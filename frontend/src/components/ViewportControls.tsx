@@ -1,3 +1,5 @@
+import { ChevronLeft, ChevronRight, ChevronUp, ChevronDown, ArrowUp, ArrowDown } from "lucide-react";
+
 type ViewportControlsProps = {
   onForward: () => void;
   onBackward: () => void;
@@ -18,7 +20,7 @@ export function ViewportControls({
   return (
     <div className="overlay-controls">
       <button type="button" className="nav-arrow left" aria-label="Turn left" onClick={onTurnLeft}>
-        <span aria-hidden>◀</span>
+        <ChevronLeft size={32} strokeWidth={3} />
       </button>
       <button
         type="button"
@@ -26,7 +28,7 @@ export function ViewportControls({
         aria-label="Turn right"
         onClick={onTurnRight}
       >
-        <span aria-hidden>▶</span>
+        <ChevronRight size={32} strokeWidth={3} />
       </button>
       <button
         type="button"
@@ -34,7 +36,7 @@ export function ViewportControls({
         aria-label="Move forward"
         onClick={onForward}
       >
-        <span aria-hidden>▲</span>
+        <ChevronUp size={32} strokeWidth={3} />
       </button>
       <button
         type="button"
@@ -42,13 +44,13 @@ export function ViewportControls({
         aria-label="Move backward"
         onClick={onBackward}
       >
-        <span aria-hidden>▼</span>
+        <ChevronDown size={32} strokeWidth={3} />
       </button>
       <button type="button" className="nav-arrow z-up" aria-label="Move up" onClick={onUp}>
-        <span aria-hidden>↥</span>
+        <ArrowUp size={28} strokeWidth={3} />
       </button>
       <button type="button" className="nav-arrow z-down" aria-label="Move down" onClick={onDown}>
-        <span aria-hidden>↧</span>
+        <ArrowDown size={28} strokeWidth={3} />
       </button>
     </div>
   );
