@@ -258,18 +258,42 @@ def _load_database() -> list[dict]:
     return traj
 
 
-def _extract_frame(cap, timestamp_s: float) -> np.ndarray:
-    """Extract a single frame from the video at the given timestamp.
+def _extract_frame_jpeg(timestamp_s: float, video_path: str = "/data/video.MP4") -> bytes:
+    """Extract a single frame as JPEG bytes using ffmpeg -ss (fast keyframe seek).
 
-    Returns the frame as a BGR numpy array.
+    Returns raw JPEG bytes.
     """
-    import cv2
+    import subprocess
 
-    cap.set(cv2.CAP_PROP_POS_MSEC, timestamp_s * 1000)
-    ret, frame = cap.read()
-    if not ret:
-        raise RuntimeError(f"Failed to read frame at {timestamp_s:.3f}s from video")
-    return frame
+    h = int(timestamp_s // 3600)
+    m = int((timestamp_s % 3600) // 60)
+    s = timestamp_s % 60
+    ss = f"{h:02d}:{m:02d}:{s:06.3f}"
+
+    result = subprocess.run(
+        [
+            "ffmpeg", "-ss", ss, "-i", video_path,
+            "-frames:v", "1", "-q:v", "2", "-f", "image2", "-c:v", "mjpeg",
+            "pipe:1",
+        ],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed at {ss}: {result.stderr.decode()}")
+    return result.stdout
+
+
+# Keep old cv2-based extraction for reference
+# def _extract_frame(cap, timestamp_s: float) -> np.ndarray:
+#     """Extract a single frame from the video at the given timestamp.
+#     Returns the frame as a BGR numpy array.
+#     """
+#     import cv2
+#     cap.set(cv2.CAP_PROP_POS_MSEC, timestamp_s * 1000)
+#     ret, frame = cap.read()
+#     if not ret:
+#         raise RuntimeError(f"Failed to read frame at {timestamp_s:.3f}s from video")
+#     return frame
 
 
 # ---------------------------------------------------------------------------
@@ -277,10 +301,11 @@ def _extract_frame(cap, timestamp_s: float) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+# GPU + volume commented out while depth/reprojection is disabled
 @app.cls(
     image=image,
-    gpu="H200",
-    volumes={"/checkpoints": checkpoint_vol},
+    # gpu="H200",
+    # volumes={"/checkpoints": checkpoint_vol},
     timeout=600,
     scaledown_window=300,
 )
@@ -309,33 +334,33 @@ class GetImage:
 
     @modal.enter()
     def setup(self):
-        import cv2
-        import torch
+        # import cv2
+        # import torch
+        #
+        # import depth_pro
+        # from depth_pro.depth_pro import (
+        #     DEFAULT_MONODEPTH_CONFIG_DICT,
+        #     DepthProConfig,
+        # )
+        # # Load DepthPro (once per container lifetime)
+        # config = DepthProConfig(
+        #     patch_encoder_preset=DEFAULT_MONODEPTH_CONFIG_DICT.patch_encoder_preset,
+        #     image_encoder_preset=DEFAULT_MONODEPTH_CONFIG_DICT.image_encoder_preset,
+        #     decoder_features=DEFAULT_MONODEPTH_CONFIG_DICT.decoder_features,
+        #     use_fov_head=DEFAULT_MONODEPTH_CONFIG_DICT.use_fov_head,
+        #     fov_encoder_preset=DEFAULT_MONODEPTH_CONFIG_DICT.fov_encoder_preset,
+        #     checkpoint_uri=CKPT_PATH,
+        # )
+        # self.model, self.transform = depth_pro.create_model_and_transforms(
+        #     config=config
+        # )
+        # self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        # self.model = self.model.to(self.device).half().eval()
 
-        import depth_pro
-        from depth_pro.depth_pro import (
-            DEFAULT_MONODEPTH_CONFIG_DICT,
-            DepthProConfig,
-        )
-        # Load DepthPro (once per container lifetime)
-        config = DepthProConfig(
-            patch_encoder_preset=DEFAULT_MONODEPTH_CONFIG_DICT.patch_encoder_preset,
-            image_encoder_preset=DEFAULT_MONODEPTH_CONFIG_DICT.image_encoder_preset,
-            decoder_features=DEFAULT_MONODEPTH_CONFIG_DICT.decoder_features,
-            use_fov_head=DEFAULT_MONODEPTH_CONFIG_DICT.use_fov_head,
-            fov_encoder_preset=DEFAULT_MONODEPTH_CONFIG_DICT.fov_encoder_preset,
-            checkpoint_uri=CKPT_PATH,
-        )
-        self.model, self.transform = depth_pro.create_model_and_transforms(
-            config=config
-        )
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model = self.model.to(self.device).half().eval()
-
-        # Open video capture (kept open for the container lifetime)
-        self.cap = cv2.VideoCapture("/data/video.MP4")
-        if not self.cap.isOpened():
-            raise RuntimeError("Failed to open /data/video.MP4")
+        # # Open video capture (kept open for the container lifetime)
+        # self.cap = cv2.VideoCapture("/data/video.MP4")
+        # if not self.cap.isOpened():
+        #     raise RuntimeError("Failed to open /data/video.MP4")
 
         # Build image database
         self.db = _load_database()
@@ -366,100 +391,105 @@ class GetImage:
 
     @modal.fastapi_endpoint()
     def getImage(self, x: float, y: float, z: float, yaw: float):
-        """Synthesise a view from (x, y, z) at the given yaw (degrees).
+        """Return the closest recorded frame to (x, y, z, yaw).
 
-        Pitch and roll of the output are fixed at 0.
-        Returns JSON with a base64-encoded PNG.
+        Returns JSON with a base64-encoded JPEG.
         """
         import base64
-
-        import cv2
-        import torch
 
         # 1. Pick the best source image
         idx = self._find_best(x, y, z, yaw)
         src = self.db[idx]
         print(f"Selected source frame at t={src['timestamp_s']:.3f}s")
 
-        # 2. Extract frame from video at the matching timestamp
-        frame_bgr = _extract_frame(self.cap, src["timestamp_s"])
-        img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        # 2. Extract frame via ffmpeg (fast keyframe seek)
+        jpeg_bytes = _extract_frame_jpeg(src["timestamp_s"])
 
-        # 3. Depth estimation — feed numpy RGB array directly to transform
-        image_t = self.transform(img_rgb).half().to(self.device)
+        # # --- Depth estimation + reprojection (commented out for speed) ---
+        # import cv2
+        # import torch
+        #
+        # frame_bgr = cv2.imdecode(
+        #     np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR
+        # )
+        # img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        #
+        # # 3. Depth estimation
+        # image_t = self.transform(img_rgb).half().to(self.device)
+        # with torch.no_grad():
+        #     pred = self.model.infer(image_t, f_px=None)
+        # depth_m = pred["depth"].detach().float().cpu().numpy()
+        # focal = float(pred["focallength_px"])
+        #
+        # # 4. Relative pose: source → target
+        # R_src = rot_y(src["yaw"]) @ rot_x(src["pitch"]) @ rot_z(src["roll"])
+        # R_tgt = rot_y(yaw)
+        # R = R_tgt @ R_src.T
+        # dp = np.array(
+        #     [x - src["x"], y - src["y"], z - src["z"]], dtype=np.float32
+        # )
+        # t = dp @ R_src.T
+        #
+        # # 5. Reproject to novel view
+        # H, W = depth_m.shape
+        # K = build_K(W, H, focal)
+        # out_bgr, _ = reproject_novel_view(frame_bgr, depth_m, K, R, t)
+        #
+        # _, buf = cv2.imencode(".png", out_bgr)
+        # jpeg_bytes = buf.tobytes()
+        # --- End depth estimation + reprojection ---
 
-        with torch.no_grad():
-            pred = self.model.infer(image_t, f_px=None)
-
-        depth_m = pred["depth"].detach().float().cpu().numpy()
-        focal = float(pred["focallength_px"])
-
-        # 4. Relative pose: source → target
-        R_src = (
-            rot_y(src["yaw"]) @ rot_x(src["pitch"]) @ rot_z(src["roll"])
-        )
-        R_tgt = rot_y(yaw)  # target pitch=0, roll=0
-
-        R = R_tgt @ R_src.T
-        dp = np.array(
-            [x - src["x"], y - src["y"], z - src["z"]], dtype=np.float32
-        )
-        t = dp @ R_src.T
-
-        # 5. Reproject to novel view
-        H, W = depth_m.shape
-        K = build_K(W, H, focal)
-        out_bgr, _ = reproject_novel_view(frame_bgr, depth_m, K, R, t)
-
-        # 6. Return base64-encoded PNG
-        _, buf = cv2.imencode(".png", out_bgr)
-        b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+        b64 = base64.b64encode(jpeg_bytes).decode("ascii")
         return {"image_base64": b64}
 
     @modal.method()
     def getImageRemote(
         self, x: float, y: float, z: float, yaw: float
     ) -> dict:
-        """Same as getImage but returns a dict for programmatic callers.
+        """Return the closest recorded frame to (x, y, z, yaw).
 
-        Returns: {"image_png": bytes, "source_idx": int, "source_timestamp_s": float}
+        Returns: {"image_jpeg": bytes, "source_idx": int, "source_timestamp_s": float}
         """
-        import cv2
-        import torch
-
         idx = self._find_best(x, y, z, yaw)
         src = self.db[idx]
         print(f"Selected source frame at t={src['timestamp_s']:.3f}s")
 
-        frame_bgr = _extract_frame(self.cap, src["timestamp_s"])
-        img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        # Extract frame via ffmpeg (fast keyframe seek)
+        jpeg_bytes = _extract_frame_jpeg(src["timestamp_s"])
 
-        # Feed numpy RGB array directly to transform (skip temp PNG save + load_rgb)
-        image_t = self.transform(img_rgb).half().to(self.device)
+        # # --- Depth estimation + reprojection (commented out for speed) ---
+        # import cv2
+        # import torch
+        #
+        # frame_bgr = cv2.imdecode(
+        #     np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR
+        # )
+        # img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        #
+        # image_t = self.transform(img_rgb).half().to(self.device)
+        # with torch.no_grad():
+        #     pred = self.model.infer(image_t, f_px=None)
+        # depth_m = pred["depth"].detach().float().cpu().numpy()
+        # focal = float(pred["focallength_px"])
+        #
+        # R_src = rot_y(src["yaw"]) @ rot_x(src["pitch"]) @ rot_z(src["roll"])
+        # R_tgt = rot_y(yaw)
+        # R = R_tgt @ R_src.T
+        # dp = np.array(
+        #     [x - src["x"], y - src["y"], z - src["z"]], dtype=np.float32
+        # )
+        # t = dp @ R_src.T
+        #
+        # H, W = depth_m.shape
+        # K = build_K(W, H, focal)
+        # out_bgr, _ = reproject_novel_view(frame_bgr, depth_m, K, R, t)
+        #
+        # _, buf = cv2.imencode(".png", out_bgr)
+        # jpeg_bytes = buf.tobytes()
+        # --- End depth estimation + reprojection ---
 
-        with torch.no_grad():
-            pred = self.model.infer(image_t, f_px=None)
-
-        depth_m = pred["depth"].detach().float().cpu().numpy()
-        focal = float(pred["focallength_px"])
-
-        R_src = (
-            rot_y(src["yaw"]) @ rot_x(src["pitch"]) @ rot_z(src["roll"])
-        )
-        R_tgt = rot_y(yaw)
-        R = R_tgt @ R_src.T
-        dp = np.array(
-            [x - src["x"], y - src["y"], z - src["z"]], dtype=np.float32
-        )
-        t = dp @ R_src.T
-
-        H, W = depth_m.shape
-        K = build_K(W, H, focal)
-        out_bgr, _ = reproject_novel_view(frame_bgr, depth_m, K, R, t)
-
-        _, buf = cv2.imencode(".png", out_bgr)
         return {
-            "image_png": buf.tobytes(),
+            "image_jpeg": jpeg_bytes,
             "source_idx": idx,
             "source_timestamp_s": src["timestamp_s"],
         }
