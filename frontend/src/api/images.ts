@@ -1,12 +1,22 @@
 import { API_BASE_URL } from "../config";
 import type { Pose } from "../types/pose";
 
+export type AllowedMoves = {
+  forward: boolean;
+  backward: boolean;
+  left: boolean;
+  right: boolean;
+  turnLeft: boolean;
+  turnRight: boolean;
+};
+
 type GetImagesResponse = {
   image_base64?: string;
   image?: string;
   imageBase64?: string;
   base64?: string;
   mimeType?: string;
+  allowed?: unknown;
 };
 
 function getBase64Field(response: GetImagesResponse): string {
@@ -19,7 +29,46 @@ function getBase64Field(response: GetImagesResponse): string {
   );
 }
 
-export async function fetchImageForPose(pose: Pose): Promise<string> {
+function parseAllowed(allowed?: unknown): AllowedMoves {
+  const all = { forward: true, backward: true, left: true, right: true, turnLeft: true, turnRight: true };
+  if (!allowed) return all;
+
+  // Array of direction strings: ["forward", "left", "turnLeft"]
+  if (Array.isArray(allowed)) {
+    return {
+      forward: allowed.includes("forward"),
+      backward: allowed.includes("backward"),
+      left: allowed.includes("left"),
+      right: allowed.includes("right"),
+      turnLeft: allowed.includes("turnLeft"),
+      turnRight: allowed.includes("turnRight"),
+    };
+  }
+
+  // Object like { forward: true, backward: false, turnLeft: true }
+  if (typeof allowed === "object") {
+    const obj = allowed as Record<string, boolean>;
+    return {
+      forward: !!obj.forward,
+      backward: !!obj.backward,
+      left: !!obj.left,
+      right: !!obj.right,
+      turnLeft: !!obj.turnLeft,
+      turnRight: !!obj.turnRight,
+    };
+  }
+
+  return all;
+}
+
+export type FetchImageResult = {
+  imageSrc: string;
+  allowed: AllowedMoves;
+};
+
+export async function fetchImageForPose(pose: Pose): Promise<string>;
+export async function fetchImageForPose(pose: Pose, opts: { withAllowed: true }): Promise<FetchImageResult>;
+export async function fetchImageForPose(pose: Pose, opts?: { withAllowed: boolean }): Promise<string | FetchImageResult> {
   const params = new URLSearchParams({
     x: String(pose.x),
     y: String(pose.y),
@@ -46,6 +95,12 @@ export async function fetchImageForPose(pose: Pose): Promise<string> {
   }
 
   const mime = payload.mimeType ?? "image/jpeg";
-  return `data:${mime};base64,${base64}`;
+  const imageSrc = `data:${mime};base64,${base64}`;
+
+  if (opts?.withAllowed) {
+    console.log("API allowed field:", payload.allowed);
+    return { imageSrc, allowed: parseAllowed(payload.allowed) };
+  }
+  return imageSrc;
 }
 

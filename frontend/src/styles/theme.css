@@ -581,6 +581,20 @@ body {
   transform: scale(0.95);
 }
 
+.nav-arrow:disabled {
+  opacity: 0.15;
+  cursor: not-allowed;
+  background: rgba(0, 0, 0, 0.3);
+  border-color: rgba(255, 255, 255, 0.1);
+  transform: none !important;
+}
+
+.nav-arrow:disabled:hover {
+  background: rgba(0, 0, 0, 0.3);
+  border-color: rgba(255, 255, 255, 0.1);
+  transform: none;
+}
+
 /* Rotation controls - bottom corners with circular arrows */
 .nav-arrow.rotate-left {
   bottom: var(--space-8);
