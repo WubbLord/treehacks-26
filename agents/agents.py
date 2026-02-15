@@ -8,11 +8,12 @@ Requires app.py to be deployed first (provides the GetImage class).
 
 import base64
 import json
+import math
 import time
 import uuid
 
 import modal
-# from starlette.responses import StreamingResponse, Response
+from starlette.responses import StreamingResponse, Response
 
 # ---------------------------------------------------------------------------
 # Model registry – add new vision-language models here
@@ -81,20 +82,45 @@ agent_image = (
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """\
-You are a building-exploration agent.  You navigate by requesting camera
-views at specific 3D positions and yaw angles.
+You are a building-exploration agent.  You navigate a discrete grid by
+choosing movement actions.
 
-## World info
-- yaw is in degrees (0-360).  0 = initial forward direction.
+## Coordinate system
+- The world uses (x, y, z) coordinates with step size 0.1 meters.
+- **x and y** are the horizontal axes (the floor plane). **z** is the
+  vertical axis (floor level) — do NOT change z unless moving between floors.
+- **yaw** is your facing direction in degrees. Only use: 0, 90, 180, 270.
+  - yaw=0 → facing +x direction
+  - yaw=90 → facing +y direction
+  - yaw=180 → facing -x direction
+  - yaw=270 → facing -y direction
+
+## Movement rules
+Each turn you will see which directions are **allowed** (true/false):
+  forward, backward, left, right, turnLeft, turnRight
+
+You MUST only move in allowed directions. To move:
+- **forward**: advance 0.1m in your facing direction
+  - yaw=0 → x += 0.1
+  - yaw=90 → y += 0.1
+  - yaw=180 → x -= 0.1
+  - yaw=270 → y -= 0.1
+- **backward**: opposite of forward
+- **left/right**: strafe perpendicular to facing direction
+- **turnLeft**: yaw -= 90 (position stays the same)
+- **turnRight**: yaw += 90 (position stays the same)
+
+IMPORTANT: Do NOT invent arbitrary coordinate changes. Only change x or y by
+exactly 0.1 (or -0.1) per step, and only in allowed directions. Keep z the
+same unless you are changing floors.
 
 ## Your task
 The user asked: "{query}"
 Explore the building to find what they asked for.
 
 ## How to respond
-Each turn you will receive an image from your current position.  Look at
-the image, consider your trajectory so far, then output **only** a JSON
-object (no markdown, no extra text) in one of these two forms:
+Each turn you receive an image, your position, and which directions are
+allowed.  Output **only** a JSON object (no markdown, no extra text):
 
 If you have NOT found the target:
 {{"action": "move", "x": <float>, "y": <float>, "z": <float>, "yaw": <float>, "reasoning": "<1-2 sentences>"}}
@@ -103,22 +129,15 @@ If you CAN SEE the target in the current image:
 {{"action": "found", "description": "<what and where you see it>", "confidence": "<low|medium|high>", "evidence": ["<visual cue 1>", "<visual cue 2>"]}}
 
 Use "found" only when confidence is HIGH based on direct visual evidence in
-the current image.  If confidence is not high, choose "move" to collect a
-better viewpoint.
+the current image.
 
-Before using "found", self-check all of these:
+Before using "found", self-check:
 1) The object's identity matches the query (not just similar-looking).
 2) Its location in the image is explicit (left/center/right + nearby context).
 3) You can cite at least two concrete visual attributes (shape/color/text/context).
 
 Do NOT use "found" if the object is partially occluded, blurry, too far, or
-ambiguous with similar objects.  In those cases, "move" by rotating slightly,
-moving closer, or changing viewpoint.
-
-For "found.description", include:
-- what the object is,
-- where it is in the frame relative to landmarks,
-- the phrase "high confidence".
+ambiguous.  Instead "move" closer or rotate.
 
 Do NOT revisit positions you have already been to.
 """
@@ -211,17 +230,19 @@ class AgentRunner:
             get_image = self.get_image_cls()
             result = get_image.getImageRemote.remote(x, y, z, yaw)
 
-            src_idx = result["source_idx"]
-            src_ts = result.get("source_timestamp_s", result.get("source_filename", "?"))
-            img_bytes: bytes = result["image_png"]
+            img_bytes: bytes = result["image"]
+            actual_x, actual_y, actual_z = result["x"], result["y"], result["z"]
+            actual_yaw = result["yaw"]
+            allowed = result["allowed"]
+            filename = result.get("filename", "?")
             img_b64 = base64.b64encode(img_bytes).decode("ascii")
             last_image_b64 = img_b64
 
-            print(f"[Agent {agent_id}]   -> source_idx={src_idx}  source={src_ts}  image_bytes={len(img_bytes)}")
+            print(f"[Agent {agent_id}]   -> file={filename}  actual=({actual_x:.2f},{actual_y:.2f},{actual_z:.2f}) yaw={actual_yaw:.1f}  allowed={allowed}")
 
             trajectory.append({
                 "x": x, "y": y, "z": z, "yaw": yaw,
-                "step": step, "source": src_ts,
+                "step": step, "filename": filename,
             })
 
             # -- build system prompt with trajectory summary ------------
@@ -245,8 +266,9 @@ class AgentRunner:
                         {
                             "type": "text",
                             "text": (
-                                f"Position: ({x:.2f}, {y:.2f}, {z:.2f}), yaw={yaw:.1f}. "
-                                f"Step {step}/{MAX_STEPS}."
+                                f"Position: ({actual_x:.2f}, {actual_y:.2f}, {actual_z:.2f}), yaw={yaw:.1f}. "
+                                f"Step {step}/{MAX_STEPS}. "
+                                f"Allowed: {json.dumps(allowed)}"
                             ),
                         },
                     ],
@@ -283,9 +305,13 @@ class AgentRunner:
                     continue
 
                 desc = str(action.get("description", ""))
-                print(f"\n[Agent {agent_id}] *** FOUND at step {step}: {desc} ***\n")
+                print(f"\n[Agent {agent_id}] *** FOUND at step {step}: {desc} ***")
+                print(f"[Agent {agent_id}]     Image file: {filename}")
+                print(f"[Agent {agent_id}]     Position: ({actual_x:.2f}, {actual_y:.2f}, {actual_z:.2f}) yaw={actual_yaw:.1f}\n")
+                directions = self._build_directions(trajectory)
                 return self._result(True, agent_id, desc,
-                                    last_image_b64, step, trajectory)
+                                    last_image_b64, step, trajectory,
+                                    directions=directions, filename=filename)
 
             if action.get("action") == "move":
                 reasoning = action.get("reasoning", "")
@@ -304,9 +330,11 @@ class AgentRunner:
                 yaw = (yaw + 30) % 360
 
         print(f"[Agent {agent_id}] Max steps reached")
+        directions = self._build_directions(trajectory)
         return self._result(False, agent_id,
                             "Max steps reached without finding target",
-                            last_image_b64, MAX_STEPS, trajectory)
+                            last_image_b64, MAX_STEPS, trajectory,
+                            directions=directions, filename=filename)
 
     # ------------------------------------------------------------------ #
     # Streaming version
@@ -347,7 +375,9 @@ class AgentRunner:
             # Get image
             get_image = self.get_image_cls()
             result = get_image.getImageRemote.remote(x, y, z, yaw)
-            img_bytes = result["image_png"]
+            img_bytes = result["image"]
+            actual_x, actual_y, actual_z = result["x"], result["y"], result["z"]
+            allowed = result["allowed"]
             img_b64 = base64.b64encode(img_bytes).decode("ascii")
             last_image_b64 = img_b64
 
@@ -372,7 +402,14 @@ class AgentRunner:
                     "role": "user",
                     "content": [
                         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-                        {"type": "text", "text": f"Position: ({x:.2f}, {y:.2f}, {z:.2f}), yaw={yaw:.1f}. Step {step}/{MAX_STEPS}."},
+                        {
+                            "type": "text",
+                            "text": (
+                                f"Position: ({actual_x:.2f}, {actual_y:.2f}, {actual_z:.2f}), yaw={yaw:.1f}. "
+                                f"Step {step}/{MAX_STEPS}. "
+                                f"Allowed: {json.dumps(allowed)}"
+                            ),
+                        },
                     ],
                 },
             ]
@@ -432,11 +469,13 @@ class AgentRunner:
             }
 
             if action_type == "found":
+                filename = result.get("filename", "")
                 yield {
                     "type": "agent_found",
                     "agent_id": agent_id,
                     "description": reasoning,
                     "final_image_b64": last_image_b64,
+                    "filename": filename,
                     "steps": step + 1,
                     "trajectory": trajectory,
                 }
@@ -463,19 +502,95 @@ class AgentRunner:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _result(found, agent_id, description, image_b64, steps, trajectory):
+    def _result(found, agent_id, description, image_b64, steps, trajectory,
+                directions=None, filename=None):
         return {
             "found": found,
             "agent_id": agent_id,
             "description": description,
             "final_image_b64": image_b64,
+            "filename": filename or "",
             "steps": steps,
             "trajectory": trajectory,
+            "directions": directions or [],
         }
 
     @staticmethod
     def _clamp(v: float, lo: float, hi: float) -> float:
         return max(lo, min(hi, v))
+
+    @staticmethod
+    def _build_directions(trajectory: list[dict]) -> list[str]:
+        """Build human-readable step-by-step directions from the trajectory.
+
+        Consolidates consecutive steps in the same direction into single
+        instructions like 'Walk forward 3 steps' rather than listing every
+        micro-movement.
+        """
+        if len(trajectory) < 2:
+            return ["You are already at the destination."]
+
+        YAW_NAMES = {0: "north", 90: "east", 180: "south", 270: "west"}
+
+        def _describe_move(prev, curr):
+            dx = curr["x"] - prev["x"]
+            dy = curr["y"] - prev["y"]
+            dz = curr["z"] - prev["z"]
+            dyaw = (curr["yaw"] - prev["yaw"]) % 360
+
+            parts = []
+            if dyaw != 0:
+                if dyaw == 90 or dyaw == -270:
+                    parts.append("turn right")
+                elif dyaw == 270 or dyaw == -90:
+                    parts.append("turn left")
+                elif dyaw == 180:
+                    parts.append("turn around")
+                else:
+                    parts.append(f"rotate {dyaw:.0f}°")
+
+            dist = math.sqrt(dx**2 + dy**2 + dz**2)
+            if dist > 0.05:
+                parts.append("walk forward")
+
+            if abs(dz) > 0.5:
+                parts.append("go up" if dz > 0 else "go down")
+
+            return " then ".join(parts) if parts else None
+
+        directions = []
+        prev = trajectory[0]
+        facing = int(round(prev["yaw"])) % 360
+        facing_name = YAW_NAMES.get(facing, f"{facing}°")
+        directions.append(f"Start at ({prev['x']:.1f}, {prev['y']:.1f}, {prev['z']:.1f}) facing {facing_name}.")
+
+        # Group consecutive similar moves
+        i = 1
+        while i < len(trajectory):
+            curr = trajectory[i]
+            move = _describe_move(prev, curr)
+            if move is None:
+                prev = curr
+                i += 1
+                continue
+
+            # Count consecutive identical moves
+            count = 1
+            while i + count < len(trajectory):
+                next_move = _describe_move(trajectory[i + count - 1], trajectory[i + count])
+                if next_move == move:
+                    count += 1
+                else:
+                    break
+
+            if "walk forward" in move and count > 1:
+                move = move.replace("walk forward", f"walk forward {count} steps")
+
+            directions.append(f"{len(directions)}. {move.capitalize()}.")
+            prev = trajectory[i + count - 1]
+            i += count
+
+        return directions
 
     @staticmethod
     def _parse_action(text: str) -> dict | None:
@@ -646,8 +761,10 @@ def stream_agents(request: dict):
                         "agent_id": i,
                         "description": r["description"],
                         "final_image_b64": r.get("final_image_b64", ""),
+                        "filename": r.get("filename", ""),
                         "steps": r["steps"],
                         "trajectory": r["trajectory"],
+                        "directions": r.get("directions", []),
                     }
                     yield f"data: {json.dumps(found_event)}\n\n"
                     if winner is None:
@@ -668,6 +785,8 @@ def stream_agents(request: dict):
             "type": "session_complete",
             "winner_agent_id": winner,
             "description": results[winner]["description"] if winner is not None else "No target found",
+            "filename": results[winner].get("filename", "") if winner is not None else "",
+            "directions": results[winner].get("directions", []) if winner is not None else [],
         }
         yield f"data: {json.dumps(complete_event)}\n\n"
 
@@ -799,9 +918,15 @@ def main(
         else:
             print(f"RESULT: No agent found the target. Best effort from agent {final['agent_id']}.")
         print(f"  description: {final['description']}")
+        if final.get("filename"):
+            print(f"  filename: {final['filename']}")
         print(f"  trajectory points: {len(final['trajectory'])}")
         if final["final_image_b64"]:
             print(f"  final image: {len(final['final_image_b64'])} chars base64")
+        if final.get("directions"):
+            print(f"\n  Directions:")
+            for d in final["directions"]:
+                print(f"    {d}")
         print(f"{'='*60}\n")
     else:
         print("\nAll agents failed.")
