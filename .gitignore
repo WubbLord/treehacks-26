@@ -234,8 +234,9 @@ data/trajectory_data/
 # Ignore calibration dataset (too large for git - 7GB+)
 data/calib_dataset/
 
-# Ignore frontend replay images (too large for git - 17GB, 1900+ images)
+# Ignore frontend replay images (too large for git)
 frontend/public/replay/images/
+frontend/public/replay/images_extracted/
 
 # Node modules (should never be committed)
 node_modules/

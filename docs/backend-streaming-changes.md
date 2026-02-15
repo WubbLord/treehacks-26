@@ -1,33 +1,154 @@
-# Backend Changes Required for Agent Streaming
+# Backend API: Session-Based Agent Streaming
 
-The frontend now has a full streaming agent UI. It expects to connect to a backend SSE endpoint that streams agent exploration events in real-time. Here's what needs to change in `agents/agents.py`.
+The frontend and Poke MCP server both need to connect to agent exploration sessions by ID. The backend exposes two endpoints: one to create a session (starts the agents), and one to observe a session's event stream (SSE with replay).
 
 ---
 
-## 1. New SSE Streaming Endpoint
+## Endpoints
 
-Create a new Modal web endpoint that accepts a POST request and returns a streaming SSE response.
+### 1. Create Session
 
-**File:** `agents/agents.py` (or a new `agents/stream.py`)
+```
+POST /sessions
+Content-Type: application/json
+```
 
+**Request body:**
+```json
+{
+  "query": "where is the nearest bathroom?",
+  "start_x": 0.0,
+  "start_y": 0.0,
+  "start_z": 0.0,
+  "start_yaw": 0.0,
+  "num_agents": 2
+}
+```
+
+**Response (200):**
+```json
+{
+  "session_id": "a1b2c3d4-e5f6-..."
+}
+```
+
+**Behavior:**
+- Generate a UUID session_id
+- Spawn N agents in the background (same logic as current `main()` in agents.py)
+- Return immediately with the session_id (do NOT block until agents finish)
+- Store session metadata in `modal.Dict` keyed by session_id
+
+**Implementation sketch:**
 ```python
-from starlette.responses import StreamingResponse
-import json
+session_events = modal.Dict.from_name("keryx-session-events", create_if_missing=True)
+session_meta = modal.Dict.from_name("keryx-session-meta", create_if_missing=True)
 
 @app.function(image=agent_image, timeout=600)
 @modal.web_endpoint(method="POST")
-def stream_agents(request: dict):
-    """SSE endpoint for streaming agent exploration to the frontend."""
+def create_session(request: dict):
+    session_id = str(uuid.uuid4())
     query = request["query"]
-    start_x = request.get("start_x", 0.0)
-    start_y = request.get("start_y", 0.0)
-    start_z = request.get("start_z", 0.0)
-    start_yaw = request.get("start_yaw", 0.0)
     num_agents = request.get("num_agents", 2)
 
+    # Store session metadata
+    session_meta[session_id] = {
+        "query": query,
+        "num_agents": num_agents,
+        "status": "running",
+        "created_at": time.time(),
+    }
+
+    # Initialize empty event list
+    session_events[session_id] = []
+
+    # Spawn agents in background
+    cancel_dict[session_id] = False
+    for i in range(num_agents):
+        agent_yaw = (request.get("start_yaw", 0.0) + (i % 2) * 180) % 360
+
+        # Emit agent_started event
+        _append_event(session_id, {
+            "type": "agent_started",
+            "agent_id": i,
+            "start_pose": {
+                "x": request.get("start_x", 0.0),
+                "y": request.get("start_y", 0.0),
+                "z": request.get("start_z", 0.0),
+                "yaw": agent_yaw,
+            },
+        })
+
+        # Spawn the agent (runs async in background)
+        run_agent_with_events.spawn(
+            session_id=session_id,
+            query=query,
+            x=request.get("start_x", 0.0),
+            y=request.get("start_y", 0.0),
+            z=request.get("start_z", 0.0),
+            yaw=agent_yaw,
+            agent_id=i,
+        )
+
+    return {"session_id": session_id}
+```
+
+---
+
+### 2. Observe Session (SSE)
+
+```
+GET /sessions/{session_id}/stream
+Accept: text/event-stream
+```
+
+**Response:** SSE stream (`text/event-stream`)
+
+**Behavior:**
+1. Look up `session_id` in the events dict
+2. **Replay** all events that have already been emitted (catches up late joiners)
+3. **Poll** for new events and stream them as they arrive
+4. Close the stream after emitting `session_complete`
+5. Return 404 if session_id is unknown
+
+**Critical requirements:**
+- **Event replay**: When a client connects, send ALL prior events for this session first. This is essential because the frontend may open the link seconds after poke-mcp created the session.
+- **Multiple concurrent readers**: Multiple clients (poke-mcp + frontend) can GET the same session stream simultaneously. Each reader maintains its own cursor into the event list.
+- **Polling interval**: Poll the events dict every ~500ms for new events.
+
+**Implementation sketch:**
+```python
+from starlette.responses import StreamingResponse
+
+@app.function(image=agent_image, timeout=600)
+@modal.web_endpoint(method="GET")
+def stream_session(session_id: str):
     def event_generator():
-        # ... see section 3 below
-        pass
+        try:
+            events = session_events[session_id]
+        except KeyError:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Session not found'})}\n\n"
+            return
+
+        cursor = 0
+        while True:
+            # Get current event list
+            events = session_events[session_id]
+
+            # Emit any new events since our cursor
+            while cursor < len(events):
+                yield f"data: {json.dumps(events[cursor])}\n\n"
+                event = events[cursor]
+                cursor += 1
+
+                # Stop after session_complete
+                if event.get("type") == "session_complete":
+                    return
+
+            # Poll interval
+            time.sleep(0.5)
+
+            # Safety timeout (10 minutes)
+            # ... check elapsed time and break if too long
 
     return StreamingResponse(
         event_generator(),
@@ -36,7 +157,7 @@ def stream_agents(request: dict):
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
             "Access-Control-Allow-Headers": "Content-Type",
         },
     )
@@ -44,288 +165,105 @@ def stream_agents(request: dict):
 
 ---
 
-## 2. New `send_agent_streaming()` Method
+## 3. Agent Runner with Events
 
-Add a generator version of `AgentRunner.send_agent()` that yields events after each step instead of only returning a final result.
-
-**Add to `AgentRunner` class:**
+Modify the agent execution to append events to the session's event list instead of (or in addition to) returning a final result.
 
 ```python
-@modal.method()
-def send_agent_streaming(
-    self,
+@app.function(image=agent_image, gpu="H200", volumes={MODEL_DIR: model_vol}, timeout=600)
+def run_agent_with_events(
+    session_id: str,
     query: str,
-    start_x: float, start_y: float, start_z: float, start_yaw: float,
+    x: float, y: float, z: float, yaw: float,
     agent_id: int,
-    session_key: str,
 ):
-    """Generator version of send_agent — yields step-by-step events."""
-    from vllm import SamplingParams
-    import base64
-    from io import BytesIO
-    from PIL import Image
+    """Run one agent and append events to the session event list."""
+    runner = AgentRunner()
+    # ... same logic as send_agent, but after each step:
 
-    x, y, z, yaw = start_x, start_y, start_z, start_yaw
-    trajectory = []
-    last_image_b64 = ""
-    sampling = SamplingParams(temperature=0.7, max_tokens=300)
+    # After each VLM inference step:
+    _append_event(session_id, {
+        "type": "agent_step",
+        "agent_id": agent_id,
+        "step": step,
+        "total_steps": MAX_STEPS,
+        "pose": {"x": x, "y": y, "z": z, "yaw": yaw},
+        "image_b64": small_b64,      # 256x256 for streaming
+        "reasoning": reasoning,
+        "action": action_type,
+    })
 
-    sys_text = SYSTEM_PROMPT.format(query=query)
-    messages = [{"role": "system", "content": [{"type": "text", "text": sys_text}]}]
+    # On found:
+    _append_event(session_id, {
+        "type": "agent_found",
+        "agent_id": agent_id,
+        "description": description,
+        "final_image_b64": full_res_b64,
+        "steps": step + 1,
+        "trajectory": trajectory,
+    })
+    # Cancel other agents
+    cancel_dict[session_id] = True
 
-    for step in range(MAX_STEPS):
-        # Cancel check
-        try:
-            if cancel_dict[session_key]:
-                return
-        except KeyError:
-            pass
-
-        # Get image
-        get_image = self.get_image_cls()
-        result = get_image.getImageRemote.remote(x, y, z, yaw)
-        img_bytes = result["image_png"]
-        img_b64 = base64.b64encode(img_bytes).decode("ascii")
-        last_image_b64 = img_b64
-
-        # Optionally downscale for streaming (256x256)
-        img = Image.open(BytesIO(img_bytes))
-        img_small = img.resize((256, 256), Image.LANCZOS)
-        buf = BytesIO()
-        img_small.save(buf, format="PNG")
-        small_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-
-        trajectory.append({"x": x, "y": y, "z": z, "yaw": yaw, "step": step})
-
-        # Append image to conversation
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-                {"type": "text", "text": f"Position: ({x:.2f}, {y:.2f}, {z:.2f}), yaw={yaw:.1f}. Step {step}/{MAX_STEPS}."},
-            ],
-        })
-
-        # VLM inference
-        outputs = self.llm.chat(messages, sampling_params=sampling)
-        raw_text = outputs[0].outputs[0].text.strip()
-        messages.append({"role": "assistant", "content": raw_text})
-
-        # Parse action
-        action = self._parse_action(raw_text)
-        reasoning = ""
-        action_type = "move"
-
-        if action is None:
-            reasoning = "(parse failed - rotating)"
-            yaw = (yaw + 30) % 360
-        elif action.get("action") == "found":
-            action_type = "found"
-            reasoning = action.get("description", "")
-        elif action.get("action") == "move":
-            reasoning = action.get("reasoning", "")
-            action_type = "move"
-        else:
-            reasoning = raw_text[:100]
-            yaw = (yaw + 30) % 360
-
-        # >>> YIELD the step event <<<
-        yield {
-            "type": "agent_step",
-            "agent_id": agent_id,
-            "step": step,
-            "total_steps": MAX_STEPS,
-            "pose": {"x": x, "y": y, "z": z, "yaw": yaw},
-            "image_b64": small_b64,      # small image for streaming
-            "reasoning": reasoning,
-            "action": action_type,
-        }
-
-        if action_type == "found":
-            # Yield found event with full-res image
-            yield {
-                "type": "agent_found",
-                "agent_id": agent_id,
-                "description": reasoning,
-                "final_image_b64": last_image_b64,  # full resolution
-                "steps": step + 1,
-                "trajectory": trajectory,
-            }
-            return
-
-        # Apply move
-        if action and action.get("action") == "move":
-            x = self._clamp(float(action.get("x", x)), *BOUNDS["x"])
-            y = self._clamp(float(action.get("y", y)), *BOUNDS["y"])
-            z = self._clamp(float(action.get("z", z)), *BOUNDS["z"])
-            yaw = float(action.get("yaw", yaw)) % 360
-
-    # Max steps reached
-    yield {
+    # On done (max steps):
+    _append_event(session_id, {
         "type": "agent_done",
         "agent_id": agent_id,
         "found": False,
         "steps": MAX_STEPS,
         "trajectory": trajectory,
-    }
+    })
+
+    # Check if all agents done → emit session_complete
+    # (Use a counter in modal.Dict to track completions)
 ```
 
----
+**Helper to append events atomically:**
+```python
+def _append_event(session_id: str, event: dict):
+    """Append an event to the session's event list."""
+    events = session_events[session_id]
+    events.append(event)
+    session_events[session_id] = events  # Write back to Dict
+```
 
-## 3. Orchestrator Function
-
-The `event_generator()` inside the SSE endpoint needs to:
-
-1. Spawn N agents in parallel
-2. Merge their streaming outputs into a single SSE stream
-3. Cancel remaining agents when one finds the target
+**Emitting session_complete:**
+Use an atomic counter in `modal.Dict` to track how many agents have finished. When the last agent finishes (or one finds the target and cancels others), emit:
 
 ```python
-def event_generator():
-    import time
-    session_key = str(uuid.uuid4())
-    cancel_dict[session_key] = False
-
-    # Emit agent_started events
-    agent_configs = []
-    for i in range(num_agents):
-        agent_yaw = (start_yaw + (i % 2) * 180) % 360
-        agent_configs.append((i, agent_yaw))
-        event = {
-            "type": "agent_started",
-            "agent_id": i,
-            "start_pose": {"x": start_x, "y": start_y, "z": start_z, "yaw": agent_yaw},
-        }
-        yield f"data: {json.dumps(event)}\n\n"
-
-    # NOTE: The exact parallelism strategy depends on Modal's streaming
-    # support. Options:
-    #
-    # Option A: Use modal.Function.map() if the streaming method supports it
-    # Option B: Run agents sequentially (simpler, less parallel)
-    # Option C: Use threading + modal .spawn() with periodic polling
-    #
-    # The simplest approach that works with Modal's current API:
-    # Run agents via .spawn(), poll for results, and emit events.
-    #
-    # For true step-by-step streaming, you may need to use a
-    # shared Modal Dict or Queue to pass intermediate results
-    # from agent containers back to the streaming endpoint.
-
-    # --- Approach using Modal Dict as message queue ---
-    # Each agent writes its step events to:
-    #   msg_dict[f"{session_key}:{agent_id}:{step}"] = event_json
-    # The orchestrator polls this dict and yields events as they appear.
-
-    runner = AgentRunner()
-    handles = []
-    for agent_id, agent_yaw in agent_configs:
-        h = runner.send_agent.spawn(
-            query=query,
-            start_x=start_x, start_y=start_y, start_z=start_z,
-            start_yaw=agent_yaw,
-            agent_id=agent_id,
-            session_key=session_key,
-        )
-        handles.append(h)
-
-    # Poll for completion (non-streaming fallback)
-    completed = [False] * num_agents
-    results = [None] * num_agents
-    winner = None
-
-    while not all(completed):
-        time.sleep(2)
-        for i, h in enumerate(handles):
-            if completed[i]:
-                continue
-            try:
-                r = h.get(timeout=0)
-            except TimeoutError:
-                continue
-            except Exception:
-                completed[i] = True
-                continue
-
-            completed[i] = True
-            results[i] = r
-
-            # Emit trajectory steps retroactively
-            for step_data in r.get("trajectory", []):
-                step_event = {
-                    "type": "agent_step",
-                    "agent_id": i,
-                    "step": step_data["step"],
-                    "total_steps": MAX_STEPS,
-                    "pose": {"x": step_data["x"], "y": step_data["y"],
-                             "z": step_data["z"], "yaw": step_data["yaw"]},
-                    "image_b64": "",  # images not available retroactively
-                    "reasoning": "",
-                    "action": "move",
-                }
-                yield f"data: {json.dumps(step_event)}\n\n"
-
-            if r["found"]:
-                found_event = {
-                    "type": "agent_found",
-                    "agent_id": i,
-                    "description": r["description"],
-                    "final_image_b64": r.get("final_image_b64", ""),
-                    "steps": r["steps"],
-                    "trajectory": r["trajectory"],
-                }
-                yield f"data: {json.dumps(found_event)}\n\n"
-                if winner is None:
-                    winner = i
-                    cancel_dict[session_key] = True
-            else:
-                done_event = {
-                    "type": "agent_done",
-                    "agent_id": i,
-                    "found": False,
-                    "steps": r["steps"],
-                    "trajectory": r["trajectory"],
-                }
-                yield f"data: {json.dumps(done_event)}\n\n"
-
-    # Session complete
-    complete_event = {
-        "type": "session_complete",
-        "winner_agent_id": winner,
-        "description": results[winner]["description"] if winner is not None else "No target found",
-    }
-    yield f"data: {json.dumps(complete_event)}\n\n"
-
-    # Cleanup
-    try:
-        del cancel_dict[session_key]
-    except KeyError:
-        pass
+completion_key = f"{session_id}:completed_count"
+# Increment completed count (use a separate dict or key pattern)
+# When count == num_agents OR a winner was found and all cancelled:
+_append_event(session_id, {
+    "type": "session_complete",
+    "winner_agent_id": winner_id,  # or null
+    "description": winner_description or "No target found",
+})
 ```
 
 ---
 
-## 4. CORS Headers
+## 4. CORS
 
-The streaming endpoint MUST include these headers for the frontend to connect:
+Both endpoints need CORS headers for the frontend to connect from a different origin:
 
 ```
 Access-Control-Allow-Origin: *
-Access-Control-Allow-Methods: POST, OPTIONS
+Access-Control-Allow-Methods: GET, POST, OPTIONS
 Access-Control-Allow-Headers: Content-Type
 ```
 
-These are already included in the `StreamingResponse` headers above. You may also need to handle OPTIONS preflight requests:
-
+Handle OPTIONS preflight for the POST endpoint:
 ```python
 @app.function(image=agent_image)
 @modal.web_endpoint(method="OPTIONS")
-def stream_agents_options():
+def sessions_options():
+    from starlette.responses import Response
     return Response(
         content="",
         headers={
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
             "Access-Control-Allow-Headers": "Content-Type",
         },
     )
@@ -335,10 +273,8 @@ def stream_agents_options():
 
 ## 5. Image Size Optimization
 
-To reduce bandwidth during streaming:
-
-- **Step events**: Send 256x256 images (~10-30KB base64) — good enough for the agent card thumbnails and main viewport during exploration
-- **Found events**: Send full-resolution images — this is the final result the user cares about
+- **Step events**: Send 256x256 PNG (~10-30KB base64) — good for thumbnails and live viewport
+- **Found events**: Send full-resolution image — this is the final result
 
 ```python
 from PIL import Image
@@ -354,27 +290,18 @@ def downscale_image(img_bytes: bytes, size=(256, 256)) -> str:
 
 ---
 
-## 6. True Real-Time Streaming (Advanced)
+## 6. Session Cleanup
 
-The approach above (polling `.spawn()` handles) sends events in batches when an agent completes, not step-by-step. For true real-time streaming, consider:
-
-**Option A: Modal Dict as message queue**
-- Each agent writes step events to a shared `modal.Dict` with keys like `{session_key}:{agent_id}:step:{n}`
-- The orchestrator polls this dict every ~500ms and yields new events
-
-**Option B: Generator-based streaming with `send_agent_streaming()`**
-- If Modal supports streaming return values from `.remote()` calls (check Modal docs for generator support), use the `send_agent_streaming()` method above directly
-- This is the cleanest approach but depends on Modal's support for streaming generators across containers
-
-**Option C: WebSocket via Modal**
-- Use FastAPI WebSocket support with Modal's `@modal.asgi_app()` decorator
-- More complex but gives bidirectional communication
+Sessions should auto-expire. Simple approach:
+- Store `created_at` timestamp in session metadata
+- Background cleanup function (or lazy cleanup on access) deletes sessions older than 15 minutes
+- The event dict entries get deleted along with the metadata
 
 ---
 
 ## 7. Event Type Reference
 
-The frontend expects these exact event shapes (TypeScript types):
+These event types are unchanged from the frontend's TypeScript definitions:
 
 ```typescript
 type AgentStartedEvent = {
@@ -387,10 +314,10 @@ type AgentStepEvent = {
   type: "agent_step";
   agent_id: number;
   step: number;
-  total_steps: number;        // MAX_STEPS (15)
+  total_steps: number;
   pose: { x: number; y: number; z: number; yaw: number };
-  image_b64: string;          // base64 PNG (256x256 for steps)
-  reasoning: string;          // LLM reasoning text
+  image_b64: string;
+  reasoning: string;
   action: "move" | "found";
 };
 
@@ -398,7 +325,7 @@ type AgentFoundEvent = {
   type: "agent_found";
   agent_id: number;
   description: string;
-  final_image_b64: string;    // full resolution base64 PNG
+  final_image_b64: string;
   steps: number;
   trajectory: Array<{ x: number; y: number; z: number; yaw: number; step: number }>;
 };
@@ -431,11 +358,16 @@ data: {"type":"agent_step","agent_id":0,"step":3,...}\n\n
 
 ---
 
-## 8. Frontend Config
+## 8. Frontend Configuration
 
-The frontend reads the streaming endpoint URL from the `VITE_AGENT_STREAM_URL` environment variable. Default is:
+The frontend reads endpoints from environment variables:
+
 ```
-https://zhangbrwubb--keryx-agents-stream.modal.run
+VITE_AGENT_API_URL=https://zhangbrwubb--keryx-agents-api.modal.run
 ```
 
-Update this to match whatever URL Modal assigns to the new endpoint after deployment.
+The frontend will call:
+- `POST {VITE_AGENT_API_URL}/sessions` to create a session
+- `GET {VITE_AGENT_API_URL}/sessions/{session_id}/stream` to observe
+
+If `VITE_AGENT_API_URL` is not set, the frontend falls back to `VITE_AGENT_STREAM_URL` (the old single-endpoint URL) for backward compatibility.

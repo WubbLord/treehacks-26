@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { startAgentStream } from "../api/agentStream";
+import {
+  createSession,
+  observeAgentStream,
+  startAgentStream,
+} from "../api/agentStream";
 import { fetchImageForPose } from "../api/images";
 import { DEFAULT_AGENT_COUNT, MAX_AGENT_STEPS } from "../config";
 import type { AgentState, AgentStep, SessionStatus } from "../types/agent";
@@ -8,6 +12,7 @@ import type { AgentEvent } from "../api/agentStream";
 const MOCK_MODE = import.meta.env.VITE_AGENT_MOCK === "true";
 
 export function useAgentSession() {
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionStatus, setSessionStatus] = useState<SessionStatus>("idle");
   const [agents, setAgents] = useState<Map<number, AgentState>>(new Map());
   const [winnerAgentId, setWinnerAgentId] = useState<number | null>(null);
@@ -114,14 +119,47 @@ export function useAgentSession() {
     }
   }, []);
 
+  // -------------------------------------------------------------------
+  // Join an existing session by ID (GET /sessions/:id/stream)
+  // -------------------------------------------------------------------
+  const joinSession = useCallback(
+    (id: string) => {
+      setSessionStatus("running");
+      setAgents(new Map());
+      setWinnerAgentId(null);
+      setError("");
+      setSelectedAgentId(null);
+      setSessionId(id);
+      abortRef.current?.abort();
+
+      const controller = observeAgentStream({
+        sessionId: id,
+        onEvent: processEvent,
+        onError: (err) => {
+          setError(err.message);
+          setSessionStatus("error");
+        },
+        onComplete: () => {
+          setSessionStatus((s) => (s === "running" ? "complete" : s));
+        },
+      });
+      abortRef.current = controller;
+    },
+    [processEvent],
+  );
+
+  // -------------------------------------------------------------------
+  // Start a new session (POST /sessions then observe)
+  // -------------------------------------------------------------------
   const startSession = useCallback(
-    (query: string, numAgents = DEFAULT_AGENT_COUNT) => {
+    async (query: string, numAgents = DEFAULT_AGENT_COUNT) => {
       // Reset state
       setSessionStatus("running");
       setAgents(new Map());
       setWinnerAgentId(null);
       setError("");
       setSelectedAgentId(null);
+      setSessionId(null);
       abortRef.current?.abort();
       mockTimersRef.current.forEach(clearTimeout);
       mockTimersRef.current = [];
@@ -133,19 +171,40 @@ export function useAgentSession() {
         return;
       }
 
-      const controller = startAgentStream({
-        query,
-        numAgents,
-        onEvent: processEvent,
-        onError: (err) => {
-          setError(err.message);
-          setSessionStatus("error");
-        },
-        onComplete: () => {
-          setSessionStatus((s) => (s === "running" ? "complete" : s));
-        },
-      });
-      abortRef.current = controller;
+      try {
+        // Create the session via POST
+        const id = await createSession({ query, numAgents });
+        setSessionId(id);
+
+        // Observe it via GET
+        const controller = observeAgentStream({
+          sessionId: id,
+          onEvent: processEvent,
+          onError: (err) => {
+            setError(err.message);
+            setSessionStatus("error");
+          },
+          onComplete: () => {
+            setSessionStatus((s) => (s === "running" ? "complete" : s));
+          },
+        });
+        abortRef.current = controller;
+      } catch (err) {
+        // Fallback: use the legacy single-POST stream
+        const controller = startAgentStream({
+          query,
+          numAgents,
+          onEvent: processEvent,
+          onError: (e) => {
+            setError(e.message);
+            setSessionStatus("error");
+          },
+          onComplete: () => {
+            setSessionStatus((s) => (s === "running" ? "complete" : s));
+          },
+        });
+        abortRef.current = controller;
+      }
     },
     [processEvent],
   );
@@ -162,12 +221,14 @@ export function useAgentSession() {
   }, []);
 
   return {
+    sessionId,
     sessionStatus,
     agents,
     winnerAgentId,
     error,
     selectedAgentId,
     startSession,
+    joinSession,
     cancelSession,
     selectAgent,
   };
