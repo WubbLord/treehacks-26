@@ -213,7 +213,7 @@ class AgentRunner:
 
             src_idx = result["source_idx"]
             src_ts = result.get("source_timestamp_s", result.get("source_filename", "?"))
-            img_bytes: bytes = result.get("image_jpeg", result.get("image_png", b""))
+            img_bytes: bytes = result["image_png"]
             img_b64 = base64.b64encode(img_bytes).decode("ascii")
             last_image_b64 = img_b64
 
@@ -347,7 +347,7 @@ class AgentRunner:
             # Get image
             get_image = self.get_image_cls()
             result = get_image.getImageRemote.remote(x, y, z, yaw)
-            img_bytes = result.get("image_jpeg", result.get("image_png", b""))
+            img_bytes = result["image_png"]
             img_b64 = base64.b64encode(img_bytes).decode("ascii")
             last_image_b64 = img_b64
 
@@ -558,7 +558,7 @@ def spawn_agent(
 
 
 @app.function(image=agent_image, timeout=600)
-@modal.web_endpoint(method="POST")
+@modal.fastapi_endpoint(method="POST")
 def stream_agents(request: dict):
     """SSE endpoint for streaming agent exploration to the frontend."""
     query = request["query"]
@@ -691,7 +691,7 @@ def stream_agents(request: dict):
 
 
 @app.function(image=agent_image)
-@modal.web_endpoint(method="OPTIONS")
+@modal.fastapi_endpoint(method="OPTIONS")
 def stream_agents_options():
     """Handle CORS preflight requests for the streaming endpoint."""
     return Response(
