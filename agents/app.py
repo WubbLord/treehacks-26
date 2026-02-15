@@ -51,20 +51,15 @@ image = (
         copy=True,
     )
     .run_commands("cd /root && pip install -e .")
-    # Bake trajectory data + images into the container
-    .add_local_dir(
-        str(_DATA / "trajectory_data" / "mav0" / "cam0" / "data"),
-        "/data/images",
-        copy=True,
-    )
+    # Bake trajectory data + video into the container
     .add_local_file(
-        str(_DATA / "trajectory_postprocessed.csv"),
+        str(_DATA / "trajectory_coordinates.csv"),
         "/data/trajectory.csv",
         copy=True,
     )
     .add_local_file(
-        str(_DATA / "trajectory_data" / "mav0" / "cam0" / "data.csv"),
-        "/data/image_map.csv",
+        str(_DATA / "video.MP4"),
+        "/data/video.MP4",
         copy=True,
     )
 )
@@ -180,16 +175,17 @@ def reproject_novel_view(
 
 
 def _load_database() -> list[dict]:
-    """Load trajectory metadata + image filenames from container-local CSVs.
+    """Load trajectory metadata from the trajectory CSV.
 
-    Both CSVs have 797 data rows in matching order (one per frame).
-    Returns a list of dicts with keys: x, y, z, yaw, pitch, roll, filename.
+    Returns a list of dicts with keys: x, y, z, yaw, pitch, roll, timestamp_s.
+    Timestamps map directly to video timestamps for frame extraction.
     """
     traj: list[dict] = []
     with open("/data/trajectory.csv") as f:
         for row in csv.DictReader(f):
             traj.append(
                 {
+                    "timestamp_s": float(row["timestamp_s"]),
                     "x": float(row["x_m"]),
                     "y": float(row["y_m"]),
                     "z": float(row["z_m"]),
@@ -198,18 +194,21 @@ def _load_database() -> list[dict]:
                     "roll": float(row["roll_deg"]),
                 }
             )
-
-    fnames: list[str] = []
-    with open("/data/image_map.csv") as f:
-        reader = csv.reader(f)
-        next(reader)  # skip header
-        for row in reader:
-            fnames.append(row[1].strip())
-
-    for entry, fname in zip(traj, fnames):
-        entry["filename"] = fname
-
     return traj
+
+
+def _extract_frame(cap, timestamp_s: float) -> np.ndarray:
+    """Extract a single frame from the video at the given timestamp.
+
+    Returns the frame as a BGR numpy array.
+    """
+    import cv2
+
+    cap.set(cv2.CAP_PROP_POS_MSEC, timestamp_s * 1000)
+    ret, frame = cap.read()
+    if not ret:
+        raise RuntimeError(f"Failed to read frame at {timestamp_s:.3f}s from video")
+    return frame
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +248,7 @@ class GetImage:
 
     @modal.enter()
     def setup(self):
+        import cv2
         import torch
 
         import depth_pro
@@ -271,6 +271,11 @@ class GetImage:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = self.model.to(self.device).half().eval()
 
+        # Open video capture (kept open for the container lifetime)
+        self.cap = cv2.VideoCapture("/data/video.MP4")
+        if not self.cap.isOpened():
+            raise RuntimeError("Failed to open /data/video.MP4")
+
         # Build image database
         self.db = _load_database()
 
@@ -289,7 +294,7 @@ class GetImage:
             ang_distance = math.sqrt(dyaw**2 + dpitch**2 + droll**2)
             score = pos_distance + 0.05 * ang_distance
             if i % 50 == 0:
-                print(f"  [{i}] {e['filename']}  pos_dist={pos_distance:.6f}  ang_dist={ang_distance:.6f}  score={score:.6f}")
+                print(f"  [{i}] t={e['timestamp_s']:.3f}s  pos_dist={pos_distance:.6f}  ang_dist={ang_distance:.6f}  score={score:.6f}")
             if score < best_score:
                 best_score = score
                 best_idx = i
@@ -317,13 +322,12 @@ class GetImage:
         # 1. Pick the best source image
         idx = self._find_best(x, y, z, yaw)
         src = self.db[idx]
-        print(f"Selected source image: {src['filename']}")
+        print(f"Selected source frame at t={src['timestamp_s']:.3f}s")
 
-        # 2. Load source image
-        pil_img = PILImage.open(f"/data/images/{src['filename']}").convert(
-            "RGB"
-        )
-        img_np = np.array(pil_img)
+        # 2. Extract frame from video at the matching timestamp
+        frame_bgr = _extract_frame(self.cap, src["timestamp_s"])
+        img_np = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        pil_img = PILImage.fromarray(img_np)
 
         # 3. Depth estimation
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
@@ -378,7 +382,7 @@ class GetImage:
     ) -> dict:
         """Same as getImage but returns a dict for programmatic callers.
 
-        Returns: {"image_png": bytes, "source_idx": int, "source_filename": str}
+        Returns: {"image_png": bytes, "source_idx": int, "source_timestamp_s": float}
         """
         import tempfile
 
@@ -390,12 +394,11 @@ class GetImage:
 
         idx = self._find_best(x, y, z, yaw)
         src = self.db[idx]
-        print(f"Selected source image: {src['filename']}")
+        print(f"Selected source frame at t={src['timestamp_s']:.3f}s")
 
-        pil_img = PILImage.open(f"/data/images/{src['filename']}").convert(
-            "RGB"
-        )
-        img_np = np.array(pil_img)
+        frame_bgr = _extract_frame(self.cap, src["timestamp_s"])
+        img_np = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        pil_img = PILImage.fromarray(img_np)
 
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             pil_img.save(tmp, format="PNG")
@@ -420,7 +423,7 @@ class GetImage:
         )
         t = dp @ R_src.T
 
-        I_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+        I_bgr = frame_bgr
         H, W = depth_m.shape
         K = build_K(W, H, focal)
         out_bgr, _ = reproject_novel_view(I_bgr, depth_m, K, R, t)
@@ -429,5 +432,5 @@ class GetImage:
         return {
             "image_png": buf.tobytes(),
             "source_idx": idx,
-            "source_filename": src["filename"],
+            "source_timestamp_s": src["timestamp_s"],
         }

@@ -239,3 +239,5 @@ frontend/public/replay/images/
 
 # Node modules (should never be committed)
 node_modules/
+
+*.MP4
