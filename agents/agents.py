@@ -8,9 +8,11 @@ Requires app.py to be deployed first (provides the GetImage class).
 
 import base64
 import json
+import time
 import uuid
 
 import modal
+from starlette.responses import StreamingResponse, Response
 
 # ---------------------------------------------------------------------------
 # Model registry – add new vision-language models here
@@ -98,7 +100,25 @@ If you have NOT found the target:
 {{"action": "move", "x": <float>, "y": <float>, "z": <float>, "yaw": <float>, "reasoning": "<1-2 sentences>"}}
 
 If you CAN SEE the target in the current image:
-{{"action": "found", "description": "<describe what you see and where it is>"}}
+{{"action": "found", "description": "<what and where you see it>", "confidence": "<low|medium|high>", "evidence": ["<visual cue 1>", "<visual cue 2>"]}}
+
+Use "found" only when confidence is HIGH based on direct visual evidence in
+the current image.  If confidence is not high, choose "move" to collect a
+better viewpoint.
+
+Before using "found", self-check all of these:
+1) The object's identity matches the query (not just similar-looking).
+2) Its location in the image is explicit (left/center/right + nearby context).
+3) You can cite at least two concrete visual attributes (shape/color/text/context).
+
+Do NOT use "found" if the object is partially occluded, blurry, too far, or
+ambiguous with similar objects.  In those cases, "move" by rotating slightly,
+moving closer, or changing viewpoint.
+
+For "found.description", include:
+- what the object is,
+- where it is in the frame relative to landmarks,
+- the phrase "high confidence".
 
 Do NOT revisit positions you have already been to.
 """
@@ -252,7 +272,17 @@ class AgentRunner:
             print(f"[Agent {agent_id}]   Parsed action: {action}")
 
             if action.get("action") == "found":
-                desc = action.get("description", "")
+                ok, validation_msg = self._validate_found_action(action)
+                if not ok:
+                    print(f"[Agent {agent_id}]   (reject found: {validation_msg})")
+                    history_lines.append(
+                        f"- Step {step}: pos=({x:.2f},{y:.2f},{z:.2f}) yaw={yaw:.1f} "
+                        f"— rejected found ({validation_msg}), rotated 20 deg"
+                    )
+                    yaw = (yaw + 20) % 360
+                    continue
+
+                desc = str(action.get("description", ""))
                 print(f"\n[Agent {agent_id}] *** FOUND at step {step}: {desc} ***\n")
                 return self._result(True, agent_id, desc,
                                     last_image_b64, step, trajectory)
@@ -277,6 +307,156 @@ class AgentRunner:
         return self._result(False, agent_id,
                             "Max steps reached without finding target",
                             last_image_b64, MAX_STEPS, trajectory)
+
+    # ------------------------------------------------------------------ #
+    # Streaming version
+    # ------------------------------------------------------------------ #
+
+    @modal.method()
+    def send_agent_streaming(
+        self,
+        query: str,
+        start_x: float,
+        start_y: float,
+        start_z: float,
+        start_yaw: float,
+        agent_id: int,
+        session_key: str,
+    ):
+        """Generator version of send_agent — yields step-by-step events."""
+        from vllm import SamplingParams
+        from io import BytesIO
+        from PIL import Image
+
+        x, y, z, yaw = start_x, start_y, start_z, start_yaw
+        trajectory = []
+        history_lines = []
+        last_image_b64 = ""
+        sampling = SamplingParams(temperature=0.7, max_tokens=300)
+
+        base_sys_text = SYSTEM_PROMPT.format(query=query)
+
+        for step in range(MAX_STEPS):
+            # Cancel check
+            try:
+                if cancel_dict[session_key]:
+                    return
+            except KeyError:
+                pass
+
+            # Get image
+            get_image = self.get_image_cls()
+            result = get_image.getImageRemote.remote(x, y, z, yaw)
+            img_bytes = result["image_png"]
+            img_b64 = base64.b64encode(img_bytes).decode("ascii")
+            last_image_b64 = img_b64
+
+            # Downscale for streaming (256x256)
+            img = Image.open(BytesIO(img_bytes))
+            img_small = img.resize((256, 256), Image.LANCZOS)
+            buf = BytesIO()
+            img_small.save(buf, format="PNG")
+            small_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+            trajectory.append({"x": x, "y": y, "z": z, "yaw": yaw, "step": step})
+
+            # Build system prompt with trajectory summary
+            sys_text = base_sys_text
+            if history_lines:
+                sys_text += "\n\n## Trajectory so far\n" + "\n".join(history_lines)
+
+            # Fresh prompt: system + current image only
+            messages = [
+                {"role": "system", "content": [{"type": "text", "text": sys_text}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                        {"type": "text", "text": f"Position: ({x:.2f}, {y:.2f}, {z:.2f}), yaw={yaw:.1f}. Step {step}/{MAX_STEPS}."},
+                    ],
+                },
+            ]
+
+            # VLM inference
+            outputs = self.llm.chat(messages, sampling_params=sampling)
+            raw_text = outputs[0].outputs[0].text.strip()
+
+            # Parse action
+            action = self._parse_action(raw_text)
+            reasoning = ""
+            action_type = "move"
+
+            if action is None:
+                reasoning = "(parse failed - rotating)"
+                history_lines.append(
+                    f"- Step {step}: pos=({x:.2f},{y:.2f},{z:.2f}) yaw={yaw:.1f} "
+                    f"— could not decide, rotated 30 deg"
+                )
+                yaw = (yaw + 30) % 360
+            elif action.get("action") == "found":
+                ok, validation_msg = self._validate_found_action(action)
+                if not ok:
+                    reasoning = f"(rejected found: {validation_msg})"
+                    history_lines.append(
+                        f"- Step {step}: pos=({x:.2f},{y:.2f},{z:.2f}) yaw={yaw:.1f} "
+                        f"— rejected found ({validation_msg}), rotated 20 deg"
+                    )
+                    yaw = (yaw + 20) % 360
+                else:
+                    action_type = "found"
+                    reasoning = action.get("description", "")
+            elif action.get("action") == "move":
+                reasoning = action.get("reasoning", "")
+                action_type = "move"
+                history_lines.append(
+                    f"- Step {step}: pos=({x:.2f},{y:.2f},{z:.2f}) yaw={yaw:.1f} — {reasoning}"
+                )
+            else:
+                reasoning = raw_text[:100]
+                history_lines.append(
+                    f"- Step {step}: pos=({x:.2f},{y:.2f},{z:.2f}) yaw={yaw:.1f} "
+                    f"— unknown action, rotated 30 deg"
+                )
+                yaw = (yaw + 30) % 360
+
+            # Yield the step event
+            yield {
+                "type": "agent_step",
+                "agent_id": agent_id,
+                "step": step,
+                "total_steps": MAX_STEPS,
+                "pose": {"x": x, "y": y, "z": z, "yaw": yaw},
+                "image_b64": small_b64,
+                "reasoning": reasoning,
+                "action": action_type,
+            }
+
+            if action_type == "found":
+                yield {
+                    "type": "agent_found",
+                    "agent_id": agent_id,
+                    "description": reasoning,
+                    "final_image_b64": last_image_b64,
+                    "steps": step + 1,
+                    "trajectory": trajectory,
+                }
+                return
+
+            # Apply move
+            if action and action.get("action") == "move":
+                x = self._clamp(float(action.get("x", x)), *BOUNDS["x"])
+                y = self._clamp(float(action.get("y", y)), *BOUNDS["y"])
+                z = self._clamp(float(action.get("z", z)), *BOUNDS["z"])
+                yaw = float(action.get("yaw", yaw)) % 360
+
+        # Max steps reached
+        yield {
+            "type": "agent_done",
+            "agent_id": agent_id,
+            "found": False,
+            "steps": MAX_STEPS,
+            "trajectory": trajectory,
+        }
 
     # ------------------------------------------------------------------ #
     # helpers
@@ -317,6 +497,27 @@ class AgentRunner:
         except json.JSONDecodeError:
             return None
 
+    @staticmethod
+    def _validate_found_action(action: dict) -> tuple[bool, str]:
+        """Require high-confidence structured evidence before accepting found."""
+        desc = str(action.get("description", "")).strip()
+        if not desc:
+            return False, "missing description"
+
+        confidence = str(action.get("confidence", "")).strip().lower()
+        if confidence != "high":
+            return False, f'confidence must be "high" (got {confidence or "missing"})'
+
+        evidence = action.get("evidence")
+        if not isinstance(evidence, list):
+            return False, "missing evidence list"
+
+        evidence_items = [str(item).strip() for item in evidence if str(item).strip()]
+        if len(evidence_items) < 2:
+            return False, "need at least 2 evidence items"
+
+        return True, "ok"
+
 
 # ---------------------------------------------------------------------------
 # spawn_agent – Modal function that runs a single agent
@@ -352,6 +553,158 @@ def spawn_agent(
 
 
 # ---------------------------------------------------------------------------
+# SSE streaming endpoint
+# ---------------------------------------------------------------------------
+
+
+@app.function(image=agent_image, timeout=600)
+@modal.web_endpoint(method="POST")
+def stream_agents(request: dict):
+    """SSE endpoint for streaming agent exploration to the frontend."""
+    query = request["query"]
+    start_x = request.get("start_x", 0.0)
+    start_y = request.get("start_y", 0.0)
+    start_z = request.get("start_z", 0.0)
+    start_yaw = request.get("start_yaw", 0.0)
+    num_agents = request.get("num_agents", 2)
+
+    def event_generator():
+        session_key = str(uuid.uuid4())
+        cancel_dict[session_key] = False
+
+        # Emit agent_started events
+        agent_configs = []
+        for i in range(num_agents):
+            agent_yaw = (start_yaw + (i % 2) * 180) % 360
+            agent_configs.append((i, agent_yaw))
+            event = {
+                "type": "agent_started",
+                "agent_id": i,
+                "start_pose": {"x": start_x, "y": start_y, "z": start_z, "yaw": agent_yaw},
+            }
+            yield f"data: {json.dumps(event)}\n\n"
+
+        # Spawn agents and poll for completion
+        runner = AgentRunner()
+        handles = []
+        for agent_id, agent_yaw in agent_configs:
+            h = runner.send_agent.spawn(
+                query=query,
+                start_x=start_x, start_y=start_y, start_z=start_z,
+                start_yaw=agent_yaw,
+                agent_id=agent_id,
+                session_key=session_key,
+            )
+            handles.append(h)
+
+        completed = [False] * num_agents
+        results = [None] * num_agents
+        winner = None
+
+        while not all(completed):
+            time.sleep(2)
+            for i, h in enumerate(handles):
+                if completed[i]:
+                    continue
+                try:
+                    r = h.get(timeout=0)
+                except TimeoutError:
+                    continue
+                except Exception:
+                    completed[i] = True
+                    error_event = {
+                        "type": "error",
+                        "agent_id": i,
+                        "message": "Agent encountered an error",
+                    }
+                    yield f"data: {json.dumps(error_event)}\n\n"
+                    continue
+
+                completed[i] = True
+                results[i] = r
+
+                # Emit trajectory steps retroactively
+                for step_data in r.get("trajectory", []):
+                    step_event = {
+                        "type": "agent_step",
+                        "agent_id": i,
+                        "step": step_data["step"],
+                        "total_steps": MAX_STEPS,
+                        "pose": {
+                            "x": step_data["x"], "y": step_data["y"],
+                            "z": step_data["z"], "yaw": step_data["yaw"],
+                        },
+                        "image_b64": "",
+                        "reasoning": "",
+                        "action": "move",
+                    }
+                    yield f"data: {json.dumps(step_event)}\n\n"
+
+                if r["found"]:
+                    found_event = {
+                        "type": "agent_found",
+                        "agent_id": i,
+                        "description": r["description"],
+                        "final_image_b64": r.get("final_image_b64", ""),
+                        "steps": r["steps"],
+                        "trajectory": r["trajectory"],
+                    }
+                    yield f"data: {json.dumps(found_event)}\n\n"
+                    if winner is None:
+                        winner = i
+                        cancel_dict[session_key] = True
+                else:
+                    done_event = {
+                        "type": "agent_done",
+                        "agent_id": i,
+                        "found": False,
+                        "steps": r["steps"],
+                        "trajectory": r["trajectory"],
+                    }
+                    yield f"data: {json.dumps(done_event)}\n\n"
+
+        # Session complete
+        complete_event = {
+            "type": "session_complete",
+            "winner_agent_id": winner,
+            "description": results[winner]["description"] if winner is not None else "No target found",
+        }
+        yield f"data: {json.dumps(complete_event)}\n\n"
+
+        # Cleanup
+        try:
+            del cancel_dict[session_key]
+        except KeyError:
+            pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+        },
+    )
+
+
+@app.function(image=agent_image)
+@modal.web_endpoint(method="OPTIONS")
+def stream_agents_options():
+    """Handle CORS preflight requests for the streaming endpoint."""
+    return Response(
+        content="",
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Local entrypoint – launches N agents in parallel, first success wins
 # ---------------------------------------------------------------------------
 
@@ -370,8 +723,6 @@ def main(
     Usage:
         modal run agents/agents.py --query "find the nearest bathroom" --n 3
     """
-    import time
-
     session_key = str(uuid.uuid4())
     cancel_dict[session_key] = False
 
