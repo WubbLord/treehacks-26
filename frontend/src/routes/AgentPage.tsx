@@ -2,14 +2,20 @@ import { useEffect, useMemo } from "react";
 import { useParams } from "react-router-dom";
 import { useAgentSession } from "../hooks/useAgentSession";
 import { QueryInput } from "../components/QueryInput";
-import { AgentCard } from "../components/AgentCard";
-import { AgentTrajectoryMap } from "../components/AgentTrajectoryMap";
-import { DEFAULT_AGENT_COUNT } from "../config";
+import { MAX_AGENT_STEPS } from "../config";
 
 const STATUS_LABELS: Record<string, string> = {
   idle: "READY",
   running: "SEARCHING...",
   complete: "COMPLETE",
+  error: "ERROR",
+};
+
+const AGENT_STATUS_LABELS: Record<string, string> = {
+  waiting: "WAITING",
+  exploring: "EXPLORING",
+  found: "FOUND",
+  done: "DONE",
   error: "ERROR",
 };
 
@@ -22,11 +28,9 @@ export function AgentPage() {
     agents,
     winnerAgentId,
     error,
-    selectedAgentId,
     startSession,
     joinSession,
     cancelSession,
-    selectAgent,
   } = useAgentSession();
 
   // Auto-join session from URL on mount
@@ -44,22 +48,9 @@ export function AgentPage() {
   }, [sessionId, urlSessionId]);
 
   const agentList = useMemo(() => Array.from(agents.values()), [agents]);
-  const selectedAgent =
-    selectedAgentId !== null ? agents.get(selectedAgentId) : undefined;
-  const latestStep = selectedAgent?.steps[selectedAgent.steps.length - 1];
 
-  const trajectories = useMemo(
-    () =>
-      agentList.map((a) => ({
-        agentId: a.agentId,
-        points: a.trajectory.map((t) => ({ x: t.x, y: t.y, step: t.step })),
-        isWinner: a.agentId === winnerAgentId,
-      })),
-    [agentList, winnerAgentId],
-  );
-
-  const handleStart = (query: string) => {
-    startSession(query, DEFAULT_AGENT_COUNT);
+  const handleStart = (query: string, numAgents: number) => {
+    startSession(query, numAgents);
   };
 
   // Hide query form when viewing a shared session link
@@ -69,6 +60,10 @@ export function AgentPage() {
       sessionStatus === "complete" ||
       sessionStatus === "error");
 
+  // Determine grid columns based on agent count
+  const gridCols =
+    agentList.length <= 1 ? 1 : agentList.length <= 4 ? 2 : 3;
+
   return (
     <section className="agent-page">
       {/* Status bar */}
@@ -77,6 +72,21 @@ export function AgentPage() {
         <span className={`status ${sessionStatus === "error" ? "error" : ""}`}>
           {error || STATUS_LABELS[sessionStatus] || sessionStatus.toUpperCase()}
         </span>
+        {sessionStatus === "running" && !urlSessionId && (
+          <button className="replay-btn" onClick={cancelSession}>
+            CANCEL
+          </button>
+        )}
+        {sessionStatus === "complete" && winnerAgentId !== null && (
+          <span className="agent-success-label">
+            AGENT {winnerAgentId} FOUND TARGET
+          </span>
+        )}
+        {sessionStatus === "complete" && winnerAgentId === null && (
+          <span className="agent-success-label" style={{ color: "var(--swiss-black)" }}>
+            NO TARGET FOUND
+          </span>
+        )}
       </div>
 
       {/* Query input */}
@@ -84,42 +94,76 @@ export function AgentPage() {
         <QueryInput onSubmit={handleStart} disabled={false} />
       )}
 
-      {/* Main content — visible when session has started */}
+      {/* Agent feed grid — visible when session has started */}
       {sessionStatus !== "idle" && (
-        <>
-          {/* Viewport */}
-          <div className="agent-viewport">
-            <div className="viewport-card">
-              {latestStep ? (
-                <>
-                  <img
-                    className="viewport-image"
-                    src={latestStep.imageSrc}
-                    alt="Agent view"
+        <div
+          className="agent-feed-grid"
+          style={{ "--grid-cols": gridCols } as React.CSSProperties}
+        >
+          {agentList.length === 0 && (
+            <div className="agent-feed-loading">
+              <div className="loading-spinner" />
+              <p className="loading-message">Agents initializing...</p>
+            </div>
+          )}
+          {agentList.map((agent) => {
+            const latestStep = agent.steps[agent.steps.length - 1];
+            const stepCount = agent.steps.length;
+            const progress = (stepCount / MAX_AGENT_STEPS) * 100;
+            const isWinner = agent.agentId === winnerAgentId;
+
+            return (
+              <div
+                key={agent.agentId}
+                className={`agent-feed-panel${isWinner ? " winner" : ""}`}
+              >
+                {/* Header */}
+                <div className="agent-feed-header">
+                  <span className="agent-feed-id">AGENT {agent.agentId}</span>
+                  <span className={`agent-feed-status ${agent.status}`}>
+                    {AGENT_STATUS_LABELS[agent.status] ?? agent.status.toUpperCase()}
+                  </span>
+                  <span className="agent-feed-steps">
+                    {stepCount}/{MAX_AGENT_STEPS}
+                  </span>
+                </div>
+
+                {/* Progress bar */}
+                <div className="agent-feed-progress">
+                  <div
+                    className="agent-feed-progress-fill"
+                    style={{ width: `${progress}%` }}
                   />
+                </div>
 
-                  {/* Reasoning overlay */}
-                  <div className="agent-reasoning-overlay">
-                    {latestStep.reasoning}
-                  </div>
-
-                  {/* Trajectory map overlay */}
-                  {trajectories.some((t) => t.points.length > 0) && (
-                    <div className="agent-map-overlay">
-                      <AgentTrajectoryMap trajectories={trajectories} />
+                {/* Camera feed */}
+                <div className="agent-feed-image">
+                  {latestStep ? (
+                    <>
+                      <img
+                        src={latestStep.imageSrc}
+                        alt={`Agent ${agent.agentId} view`}
+                      />
+                      {/* Reasoning overlay */}
+                      <div className="agent-feed-reasoning">
+                        {latestStep.reasoning}
+                      </div>
+                      {/* Found banner */}
+                      {agent.status === "found" && (
+                        <div className="agent-found-banner">TARGET FOUND</div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="agent-feed-waiting">
+                      <div className="loading-spinner" />
+                      <span>WAITING FOR FEED...</span>
                     </div>
                   )}
-
-                  {/* Found banner */}
-                  {selectedAgent?.status === "found" && (
-                    <div className="agent-found-banner">TARGET FOUND</div>
-                  )}
-                </>
-              ) : (
-                <div className="loading-placeholder">
-                  <div className="loading-spinner" />
-                  <p className="loading-message">Agents initializing...</p>
                 </div>
+              </div>
+            );
+          })}
+        </div>
               )}
             </div>
           </div>

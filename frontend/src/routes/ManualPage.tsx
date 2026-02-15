@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { fetchImageForPose } from "../api/images";
-import { MOVE_STEP, VERTICAL_STEP, YAW_STEP_DEGREES } from "../config";
+import type { AllowedMoves } from "../api/images";
+import { MOVE_STEP, YAW_STEP_DEGREES } from "../config";
 import { ViewportControls } from "../components/ViewportControls";
 import type { Pose } from "../types/pose";
 
@@ -52,6 +53,11 @@ export function ManualPage() {
   const [pose, setPose] = useState<Pose>(initialPose);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [allowed, setAllowed] = useState<AllowedMoves>({
+    forward: true, backward: true, left: true, right: true, turnLeft: true, turnRight: true,
+  });
+  const allowedRef = useRef(allowed);
+  allowedRef.current = allowed;
 
   // Crossfade state: two image layers that alternate
   const [activeLayer, setActiveLayer] = useState<0 | 1>(0);
@@ -62,14 +68,16 @@ export function ManualPage() {
     setLoading(true);
     setError("");
 
-    fetchImageForPose(pose)
-      .then((src) => {
+    fetchImageForPose(pose, { withAllowed: true })
+      .then((result) => {
         if (!cancelled) {
+          setAllowed(result.allowed);
+
           // Set new image on the inactive layer, then crossfade to it
           const nextLayer = activeLayer === 0 ? 1 : 0;
           setImageSources((prev) => {
             const next: [string, string] = [...prev];
-            next[nextLayer] = src;
+            next[nextLayer] = result.imageSrc;
             return next;
           });
 
@@ -84,7 +92,6 @@ export function ManualPage() {
       .catch((err: unknown) => {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Unknown error");
-          // Keep showing loading placeholder or last valid image on error
         }
       })
       .finally(() => {
@@ -135,14 +142,6 @@ export function ManualPage() {
     }));
   }, []);
 
-  const moveUp = useCallback(() => {
-    setPose((prev) => ({ ...prev, z: prev.z + VERTICAL_STEP }));
-  }, []);
-
-  const moveDown = useCallback(() => {
-    setPose((prev) => ({ ...prev, z: prev.z - VERTICAL_STEP }));
-  }, []);
-
   // Keyboard controls
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -151,45 +150,38 @@ export function ManualPage() {
         return;
       }
 
+      const a = allowedRef.current;
       switch (e.key.toLowerCase()) {
         case 'w':
           e.preventDefault();
-          moveByYaw(MOVE_STEP);
+          if (a.forward) moveByYaw(MOVE_STEP);
           break;
         case 's':
           e.preventDefault();
-          moveByYaw(-MOVE_STEP);
+          if (a.backward) moveByYaw(-MOVE_STEP);
           break;
         case 'a':
           e.preventDefault();
-          strafeByYaw(MOVE_STEP);
+          if (a.left) strafeByYaw(MOVE_STEP);
           break;
         case 'd':
           e.preventDefault();
-          strafeByYaw(-MOVE_STEP);
+          if (a.right) strafeByYaw(-MOVE_STEP);
           break;
         case 'q':
           e.preventDefault();
-          rotateYaw(-YAW_STEP_DEGREES);
+          if (a.turnLeft) rotateYaw(-YAW_STEP_DEGREES);
           break;
         case 'e':
           e.preventDefault();
-          rotateYaw(YAW_STEP_DEGREES);
-          break;
-        case ' ':
-          e.preventDefault();
-          moveUp();
-          break;
-        case 'shift':
-          e.preventDefault();
-          moveDown();
+          if (a.turnRight) rotateYaw(YAW_STEP_DEGREES);
           break;
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [moveByYaw, strafeByYaw, rotateYaw, moveUp, moveDown]);
+  }, [moveByYaw, strafeByYaw, rotateYaw]);
 
   return (
     <section className="manual-page">
@@ -222,10 +214,9 @@ export function ManualPage() {
           onBackward={() => moveByYaw(-MOVE_STEP)}
           onLeft={() => strafeByYaw(MOVE_STEP)}
           onRight={() => strafeByYaw(-MOVE_STEP)}
-          onUp={moveUp}
-          onDown={moveDown}
           onTurnLeft={() => rotateYaw(-YAW_STEP_DEGREES)}
           onTurnRight={() => rotateYaw(YAW_STEP_DEGREES)}
+          allowed={allowed}
         />
       </div>
     </section>

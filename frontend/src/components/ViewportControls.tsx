@@ -1,14 +1,14 @@
 import { RotateCcw, RotateCw, ArrowUp, ArrowDown, ArrowLeft, ArrowRight } from "lucide-react";
+import type { AllowedMoves } from "../api/images";
 
 type ViewportControlsProps = {
   onForward: () => void;
   onBackward: () => void;
   onLeft: () => void;
   onRight: () => void;
-  onUp: () => void;
-  onDown: () => void;
   onTurnLeft: () => void;
   onTurnRight: () => void;
+  allowed?: AllowedMoves;
 };
 
 export function ViewportControls({
@@ -16,15 +16,21 @@ export function ViewportControls({
   onBackward,
   onLeft,
   onRight,
-  onUp,
-  onDown,
   onTurnLeft,
   onTurnRight,
+  allowed,
 }: ViewportControlsProps) {
+  const fwd = allowed?.forward ?? true;
+  const bwd = allowed?.backward ?? true;
+  const lft = allowed?.left ?? true;
+  const rgt = allowed?.right ?? true;
+  const tl = allowed?.turnLeft ?? true;
+  const tr = allowed?.turnRight ?? true;
+
   return (
     <div className="overlay-controls">
       {/* Rotation controls - bottom corners with circular arrows */}
-      <button type="button" className="nav-arrow rotate-left" aria-label="Rotate counter-clockwise" onClick={onTurnLeft} title="Turn Left (CCW)">
+      <button type="button" className="nav-arrow rotate-left" aria-label="Rotate counter-clockwise" onClick={onTurnLeft} disabled={!tl} title="Turn Left (CCW)">
         <RotateCcw size={26} strokeWidth={2.5} />
         <span className="nav-label">CCW</span>
       </button>
@@ -33,6 +39,7 @@ export function ViewportControls({
         className="nav-arrow rotate-right"
         aria-label="Rotate clockwise"
         onClick={onTurnRight}
+        disabled={!tr}
         title="Turn Right (CW)"
       >
         <RotateCw size={26} strokeWidth={2.5} />
@@ -45,6 +52,7 @@ export function ViewportControls({
         className="nav-arrow move-forward"
         aria-label="Move forward"
         onClick={onForward}
+        disabled={!fwd}
         title="Move Forward"
       >
         <ArrowUp size={28} strokeWidth={3} />
@@ -55,6 +63,7 @@ export function ViewportControls({
         className="nav-arrow move-left"
         aria-label="Strafe left"
         onClick={onLeft}
+        disabled={!lft}
         title="Strafe Left"
       >
         <ArrowLeft size={28} strokeWidth={3} />
@@ -65,6 +74,7 @@ export function ViewportControls({
         className="nav-arrow move-backward"
         aria-label="Move backward"
         onClick={onBackward}
+        disabled={!bwd}
         title="Move Backward"
       >
         <ArrowDown size={28} strokeWidth={3} />
@@ -75,23 +85,12 @@ export function ViewportControls({
         className="nav-arrow move-right"
         aria-label="Strafe right"
         onClick={onRight}
+        disabled={!rgt}
         title="Strafe Right"
       >
         <ArrowRight size={28} strokeWidth={3} />
         <span className="nav-label">RIGHT</span>
       </button>
-
-      {/* Vertical (altitude) controls - top right */}
-      <div className="nav-group altitude">
-        <span className="nav-group-label">ALT</span>
-        <button type="button" className="nav-arrow z-up" aria-label="Move up (altitude)" onClick={onUp} title="Increase Altitude">
-          <ArrowUp size={20} strokeWidth={3} />
-        </button>
-        <button type="button" className="nav-arrow z-down" aria-label="Move down (altitude)" onClick={onDown} title="Decrease Altitude">
-          <ArrowDown size={20} strokeWidth={3} />
-        </button>
-      </div>
     </div>
   );
 }
-

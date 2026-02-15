@@ -31,6 +31,7 @@ export function useAgentSession() {
   }, []);
 
   const processEvent = useCallback((event: AgentEvent) => {
+    console.log("[SSE event]", event);
     switch (event.type) {
       case "agent_started":
         setAgents((prev) => {
@@ -171,6 +172,21 @@ export function useAgentSession() {
         return;
       }
 
+      // TODO: switch to createSession + observeAgentStream once backend
+      // session endpoints are deployed. For now, use the single-POST stream.
+      const controller = startAgentStream({
+        query,
+        numAgents,
+        onEvent: processEvent,
+        onError: (e) => {
+          setError(e.message);
+          setSessionStatus("error");
+        },
+        onComplete: () => {
+          setSessionStatus((s) => (s === "running" ? "complete" : s));
+        },
+      });
+      abortRef.current = controller;
       try {
         // Create the session via POST
         const id = await createSession({ query, numAgents });
