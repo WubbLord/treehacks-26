@@ -51,10 +51,10 @@ image = (
         copy=True,
     )
     .run_commands("cd /root && pip install -e .")
-    # Bake data files into the container
+    # Bake data files — large/stable files first, small/changing files last
     .add_local_file(
-        str(_DATA / "timestamp_coordinates.csv"),
-        "/data/timestamp_coordinates.csv",
+        str(_DATA / "video.MP4"),
+        "/data/video.MP4",
         copy=True,
     )
     .add_local_file(
@@ -63,8 +63,8 @@ image = (
         copy=True,
     )
     .add_local_file(
-        str(_DATA / "video.MP4"),
-        "/data/video.MP4",
+        str(_DATA / "timestamp_coordinates.csv"),
+        "/data/timestamp_coordinates.csv",
         copy=True,
     )
 )
