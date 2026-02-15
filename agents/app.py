@@ -1,6 +1,6 @@
 """Keryx – visual search agent for building exploration.
 
-Usage:
+Usage (from project root):
     modal serve agents/app.py   # dev mode (hot-reload)
     modal deploy agents/app.py  # production
 """
@@ -37,7 +37,7 @@ image = (
         "matplotlib",
         "opencv-python-headless",
         "pillow",
-        "scipy",
+        "fastapi[standard]",
     )
     # depth_pro package
     .add_local_dir(
@@ -222,7 +222,7 @@ def _load_database() -> list[dict]:
     gpu="H200",
     volumes={"/checkpoints": checkpoint_vol},
     timeout=600,
-    container_idle_timeout=300,
+    scaledown_window=300,
 )
 class GetImage:
     """Persistent container hosting the DepthPro model and image database.
@@ -230,34 +230,16 @@ class GetImage:
     Image selection criteria
     ========================
     Given a query pose (x, y, z, yaw) with pitch=0 and roll=0, the best
-    source image I is chosen as follows:
+    source image is chosen by a linear scan over all 797 images.  Each
+    image is scored as:
 
-    1. **Spatial pre-filter** – a KD-tree over all image (x, y, z) positions
-       retrieves the 20 nearest neighbours by Euclidean distance.
+        score = pos_distance + 0.05 * ang_distance
 
-    2. **Combined score** – each candidate is scored:
+    where pos_distance is the Euclidean distance between positions and
+    ang_distance combines yaw, pitch, and roll differences.  The image
+    with the lowest score is selected.
 
-           score = pos_distance + 0.05 * ang_distance
-
-       where
-         - pos_distance = sqrt(dx^2 + dy^2 + dz^2)          (metres)
-         - ang_distance = sqrt(dyaw^2 + dpitch^2 + droll^2)  (degrees)
-           with dyaw   = shortest-arc(yaw_src, yaw_query),
-                dpitch = |pitch_src|,  droll = |roll_src|
-                (since target pitch and roll are 0)
-
-       The 0.05 weight equates ~20 deg of angular mismatch to ~1 m of
-       positional offset.  This reflects the fact that depth-based
-       reprojection handles moderate rotations more gracefully than large
-       translations (which create disoccluded regions with no source
-       pixels).
-
-    3. **Ideal ranges** – the scoring naturally favours candidates within
-       ~1 m position distance and ~10 deg angular difference.  If no
-       candidate falls within those bounds the best-scoring one is still
-       returned.
-
-    After selecting I, the endpoint:
+    After selecting the source image, the endpoint:
       - Runs DepthPro to estimate a dense depth map for I.
       - Computes the exact relative rotation R and translation t between
         the source camera pose and the query pose.
@@ -274,8 +256,6 @@ class GetImage:
             DEFAULT_MONODEPTH_CONFIG_DICT,
             DepthProConfig,
         )
-        from scipy.spatial import KDTree
-
         # Load DepthPro (once per container lifetime)
         config = DepthProConfig(
             patch_encoder_preset=DEFAULT_MONODEPTH_CONFIG_DICT.patch_encoder_preset,
@@ -291,32 +271,34 @@ class GetImage:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = self.model.to(self.device).half().eval()
 
-        # Build image database + spatial index
+        # Build image database
         self.db = _load_database()
-        positions = np.array([[e["x"], e["y"], e["z"]] for e in self.db])
-        self.kdtree = KDTree(positions)
 
     def _find_best(self, x: float, y: float, z: float, yaw: float) -> int:
-        """Return index of the best matching source image."""
-        query = np.array([x, y, z])
-        k = min(20, len(self.db))
-        dists, idxs = self.kdtree.query(query, k=k)
-        dists, idxs = np.atleast_1d(dists), np.atleast_1d(idxs)
-
-        best_score, best_idx = float("inf"), int(idxs[0])
-        for d, i in zip(dists, idxs):
-            e = self.db[int(i)]
+        """Return index of the best matching source image (linear scan)."""
+        best_score, best_idx = float("inf"), 0
+        best_pos_distance, best_ang_distance = 0.0, 0.0
+        for i, e in enumerate(self.db):
+            dx = e["x"] - x
+            dy = e["y"] - y
+            dz = e["z"] - z
+            pos_distance = math.sqrt(dx**2 + dy**2 + dz**2)
             dyaw = abs(angle_diff(e["yaw"], yaw))
             dpitch = abs(e["pitch"])
             droll = abs(e["roll"])
-            ang = math.sqrt(dyaw**2 + dpitch**2 + droll**2)
-            score = float(d) + 0.05 * ang
+            ang_distance = math.sqrt(dyaw**2 + dpitch**2 + droll**2)
+            score = pos_distance + 0.05 * ang_distance
+            if i % 50 == 0:
+                print(f"  [{i}] {e['filename']}  pos_dist={pos_distance:.6f}  ang_dist={ang_distance:.6f}  score={score:.6f}")
             if score < best_score:
                 best_score = score
-                best_idx = int(i)
+                best_idx = i
+                best_pos_distance = pos_distance
+                best_ang_distance = ang_distance
+        print(f"  Best: [{best_idx}] pos_dist={best_pos_distance:.6f}  ang_dist={best_ang_distance:.6f}  score={best_score:.6f}")
         return best_idx
 
-    @modal.web_endpoint(method="GET")
+    @modal.fastapi_endpoint()
     def getImage(self, x: float, y: float, z: float, yaw: float):
         """Synthesise a view from (x, y, z) at the given yaw (degrees).
 
@@ -335,6 +317,7 @@ class GetImage:
         # 1. Pick the best source image
         idx = self._find_best(x, y, z, yaw)
         src = self.db[idx]
+        print(f"Selected source image: {src['filename']}")
 
         # 2. Load source image
         pil_img = PILImage.open(f"/data/images/{src['filename']}").convert(
@@ -407,6 +390,7 @@ class GetImage:
 
         idx = self._find_best(x, y, z, yaw)
         src = self.db[idx]
+        print(f"Selected source image: {src['filename']}")
 
         pil_img = PILImage.open(f"/data/images/{src['filename']}").convert(
             "RGB"
