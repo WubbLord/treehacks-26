@@ -4,7 +4,7 @@ export const API_BASE_URL =
 
 export const AGENT_STREAM_URL =
   import.meta.env.VITE_AGENT_STREAM_URL ??
-  "https://zhangbrwubb--keryx-agents-stream.modal.run";
+  "https://zhangbrwubb--keryx-agents-stream-agents.modal.run";
 
 export const AGENT_API_URL =
   import.meta.env.VITE_AGENT_API_URL ?? AGENT_STREAM_URL;

@@ -4,8 +4,6 @@ import { useAgentSession } from "../hooks/useAgentSession";
 import { QueryInput } from "../components/QueryInput";
 import { AgentCard } from "../components/AgentCard";
 import { AgentTrajectoryMap } from "../components/AgentTrajectoryMap";
-import { DEFAULT_AGENT_COUNT } from "../config";
-
 const STATUS_LABELS: Record<string, string> = {
   idle: "READY",
   running: "SEARCHING...",
@@ -58,8 +56,8 @@ export function AgentPage() {
     [agentList, winnerAgentId],
   );
 
-  const handleStart = (query: string) => {
-    startSession(query, DEFAULT_AGENT_COUNT);
+  const handleStart = (query: string, numAgents: number) => {
+    startSession(query, numAgents);
   };
 
   // Hide query form when viewing a shared session link

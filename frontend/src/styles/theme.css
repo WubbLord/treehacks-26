@@ -937,6 +937,24 @@ body {
   border-color: var(--swiss-accent);
 }
 
+.agent-count-input {
+  width: 52px;
+  border: var(--border-2) solid var(--swiss-black);
+  background: var(--swiss-white);
+  padding: var(--space-4) var(--space-2);
+  font-family: var(--font-primary);
+  font-size: 0.875rem;
+  font-weight: 700;
+  text-align: center;
+  -moz-appearance: textfield;
+}
+
+.agent-count-input::-webkit-inner-spin-button,
+.agent-count-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 .agent-query-submit {
   border: var(--border-2) solid var(--swiss-black);
   background: var(--swiss-black);
