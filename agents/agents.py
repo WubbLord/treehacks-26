@@ -17,11 +17,12 @@ import modal
 # ---------------------------------------------------------------------------
 
 SUPPORTED_MODELS: dict[str, str] = {
+    "qwen3-vl-30b-a3b-thinking-fp8": "Qwen/Qwen3-VL-30B-A3B-Thinking-FP8",
     "qwen3-vl-2b": "Qwen/Qwen3-VL-2B-Instruct",
     # "qwen3-vl-8b": "Qwen/Qwen3-VL-8B-Instruct",
     # "qwen2.5-vl-3b": "Qwen/Qwen2.5-VL-3B-Instruct",
 }
-DEFAULT_MODEL = "qwen3-vl-2b"
+DEFAULT_MODEL = "qwen3-vl-30b-a3b-thinking-fp8"
 MODEL_ID = SUPPORTED_MODELS[DEFAULT_MODEL]
 
 MAX_STEPS = 15
@@ -83,7 +84,6 @@ views at specific 3D positions and yaw angles.
 
 ## World info
 - yaw is in degrees (0-360).  0 = initial forward direction.
-- You may move up to 2 m per step on any axis and rotate up to 90 deg.
 
 ## Your task
 The user asked: "{query}"
@@ -145,12 +145,15 @@ class AgentRunner:
         agent_id: int,
         session_key: str,
     ) -> dict:
-        """Run one exploration agent as a continuous multi-turn conversation.
+        """Run one exploration agent.
 
-        The conversation history (messages list) is accumulated across
-        turns so the LLM retains full context of every image it has seen
-        and every decision it has made.  vLLM's prefix caching reuses the
-        KV cache for all prior turns automatically.
+        Each turn the LLM receives a fresh two-message prompt:
+          1. System: original query/instructions + a text summary of
+             every prior step (position, reasoning).
+          2. User: only the CURRENT image + current position.
+
+        This keeps context small (one image per call) while giving the
+        LLM full memory of where it has been and what it decided.
 
         Returns dict with keys:
             found, agent_id, description, final_image_b64,
@@ -160,6 +163,7 @@ class AgentRunner:
 
         x, y, z, yaw = start_x, start_y, start_z, start_yaw
         trajectory: list[dict] = []
+        history_lines: list[str] = []   # text-only memory of past turns
         last_image_b64 = ""
         sampling = SamplingParams(temperature=0.7, max_tokens=300)
 
@@ -168,11 +172,7 @@ class AgentRunner:
         print(f"[Agent {agent_id}]        pos=({x:.2f}, {y:.2f}, {z:.2f})  yaw={yaw:.1f}")
         print(f"{'='*60}")
 
-        # Persistent conversation – system prompt is set once
-        sys_text = SYSTEM_PROMPT.format(query=query)
-        messages: list[dict] = [
-            {"role": "system", "content": [{"type": "text", "text": sys_text}]},
-        ]
+        base_sys_text = SYSTEM_PROMPT.format(query=query)
 
         for step in range(MAX_STEPS):
             # -- cancel check -------------------------------------------
@@ -204,36 +204,48 @@ class AgentRunner:
                 "step": step, "source": src_ts,
             })
 
-            # -- append new user turn with the image --------------------
-            messages.append({
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{img_b64}"},
-                    },
-                    {
-                        "type": "text",
-                        "text": (
-                            f"Position: ({x:.2f}, {y:.2f}, {z:.2f}), yaw={yaw:.1f}. "
-                            f"Step {step}/{MAX_STEPS}."
-                        ),
-                    },
-                ],
-            })
+            # -- build system prompt with trajectory summary ------------
+            sys_text = base_sys_text
+            if history_lines:
+                sys_text += (
+                    "\n\n## Trajectory so far\n"
+                    + "\n".join(history_lines)
+                )
 
-            # -- VLM inference (full conversation, KV cache reused) -----
+            # -- fresh prompt: system + current image only --------------
+            messages = [
+                {"role": "system", "content": [{"type": "text", "text": sys_text}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                        },
+                        {
+                            "type": "text",
+                            "text": (
+                                f"Position: ({x:.2f}, {y:.2f}, {z:.2f}), yaw={yaw:.1f}. "
+                                f"Step {step}/{MAX_STEPS}."
+                            ),
+                        },
+                    ],
+                },
+            ]
+
+            # -- VLM inference ------------------------------------------
             outputs = self.llm.chat(messages, sampling_params=sampling)
             raw_text = outputs[0].outputs[0].text.strip()
             print(f"[Agent {agent_id}]   LLM reasoning: {raw_text}")
-
-            # -- append assistant response to conversation history ------
-            messages.append({"role": "assistant", "content": raw_text})
 
             # -- parse JSON action --------------------------------------
             action = self._parse_action(raw_text)
             if action is None:
                 print(f"[Agent {agent_id}]   (parse failed – rotating 30 deg)")
+                history_lines.append(
+                    f"- Step {step}: pos=({x:.2f},{y:.2f},{z:.2f}) yaw={yaw:.1f} "
+                    f"— could not decide, rotated 30 deg"
+                )
                 yaw = (yaw + 30) % 360
                 continue
 
@@ -246,11 +258,19 @@ class AgentRunner:
                                     last_image_b64, step, trajectory)
 
             if action.get("action") == "move":
+                reasoning = action.get("reasoning", "")
+                history_lines.append(
+                    f"- Step {step}: pos=({x:.2f},{y:.2f},{z:.2f}) yaw={yaw:.1f} — {reasoning}"
+                )
                 x = self._clamp(float(action.get("x", x)), *BOUNDS["x"])
                 y = self._clamp(float(action.get("y", y)), *BOUNDS["y"])
                 z = self._clamp(float(action.get("z", z)), *BOUNDS["z"])
                 yaw = float(action.get("yaw", yaw)) % 360
             else:
+                history_lines.append(
+                    f"- Step {step}: pos=({x:.2f},{y:.2f},{z:.2f}) yaw={yaw:.1f} "
+                    f"— unknown action, rotated 30 deg"
+                )
                 yaw = (yaw + 30) % 360
 
         print(f"[Agent {agent_id}] Max steps reached")
