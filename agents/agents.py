@@ -213,7 +213,7 @@ class AgentRunner:
 
             src_idx = result["source_idx"]
             src_ts = result.get("source_timestamp_s", result.get("source_filename", "?"))
-            img_bytes: bytes = result["image_png"]
+            img_bytes: bytes = result.get("image_jpeg", result.get("image_png", b""))
             img_b64 = base64.b64encode(img_bytes).decode("ascii")
             last_image_b64 = img_b64
 
@@ -347,7 +347,7 @@ class AgentRunner:
             # Get image
             get_image = self.get_image_cls()
             result = get_image.getImageRemote.remote(x, y, z, yaw)
-            img_bytes = result["image_png"]
+            img_bytes = result.get("image_jpeg", result.get("image_png", b""))
             img_b64 = base64.b64encode(img_bytes).decode("ascii")
             last_image_b64 = img_b64
 
