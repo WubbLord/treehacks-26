@@ -220,3 +220,10 @@ __marimo__/
 *.pth
 *.ckpt
 /checkpoints/
+
+# Local BASALT checkout/build (keep local-only)
+data/basalt/
+
+# Ignore only raw captures; keep processed outputs trackable
+data/calibration_raw_data/
+data/trajectory_raw_data/
