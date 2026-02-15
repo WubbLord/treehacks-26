@@ -29,6 +29,56 @@ Without a matching calibration file, `basalt_vio` often runs but outputs empty t
 3. Run `basalt_vio` with your generated calibration file.
 4. Save trajectory (`trajectory.csv`) and use `tx,ty,tz` as local position.
 
+## One-command full pipeline (recommended)
+
+Use the orchestrator script:
+
+```bash
+python3 /Users/rohin/Desktop/code/treehacks-26/data/run_full_pipeline.py
+```
+
+This runs all steps in order:
+1. Build `calib_dataset` from `calibration_raw_data`
+2. Mirror `cam0 -> cam1` for calibration dataset
+3. Run `basalt_calibrate`
+4. Run `basalt_calibrate_imu`
+5. Build `trajectory_data` from `trajectory_raw_data`
+6. Mirror `cam0 -> cam1` for trajectory dataset
+7. Run `basalt_vio` and save `trajectory.csv`
+8. Run `post_process_trajectory.py` to produce `trajectory_postprocessed.csv`
+
+Useful variants:
+
+```bash
+# Show VIO GUI while running
+python3 /Users/rohin/Desktop/code/treehacks-26/data/run_full_pipeline.py --show-gui 1
+
+# Downsample trajectory video by 6x before processing
+python3 /Users/rohin/Desktop/code/treehacks-26/data/run_full_pipeline.py \
+  --traj-video-downsample-factor 6
+
+# Override raw input folders
+python3 /Users/rohin/Desktop/code/treehacks-26/data/run_full_pipeline.py \
+  --calib-raw-dir /Users/rohin/Desktop/code/treehacks-26/data/calibration_raw_data \
+  --traj-raw-dir /Users/rohin/Desktop/code/treehacks-26/data/trajectory_raw_data
+
+# Full custom output paths
+python3 /Users/rohin/Desktop/code/treehacks-26/data/run_full_pipeline.py \
+  --calib-dataset-dir /Users/rohin/Desktop/code/treehacks-26/data/calib_dataset \
+  --traj-dataset-dir /Users/rohin/Desktop/code/treehacks-26/data/trajectory_data \
+  --calib-out-dir /Users/rohin/Desktop/code/treehacks-26/data/calib_out \
+  --trajectory-csv /Users/rohin/Desktop/code/treehacks-26/data/basalt/build/trajectory.csv \
+  --postprocessed-csv /Users/rohin/Desktop/code/treehacks-26/data/trajectory_postprocessed.csv
+```
+
+By default, the pipeline also exports replay assets to:
+- `/Users/rohin/Desktop/code/treehacks-26/frontend/public/replay`
+
+This makes the frontend `Replay` tab auto-load:
+- `/replay/trajectory.csv`
+- `/replay/images_manifest.json`
+- `/replay/images/*.png`
+
 ## Commands
 
 ### 1) Build calibration dataset from raw logs

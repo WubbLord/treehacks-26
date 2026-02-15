@@ -227,3 +227,12 @@ data/basalt/
 # Ignore only raw captures; keep processed outputs trackable
 data/calibration_raw_data/
 data/trajectory_raw_data/
+
+# Ignore processed trajectory data (too large for git - 18GB, 1900+ images)
+data/trajectory_data/
+
+# Ignore calibration dataset (too large for git - 7GB+)
+data/calib_dataset/
+
+# Ignore frontend replay images (too large for git - 17GB, 1900+ images)
+frontend/public/replay/images/
