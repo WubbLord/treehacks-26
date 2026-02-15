@@ -9,6 +9,9 @@ export const AGENT_STREAM_URL =
 export const AGENT_API_URL =
   import.meta.env.VITE_AGENT_API_URL ?? AGENT_STREAM_URL;
 
+export const AGENT_API_URL =
+  import.meta.env.VITE_AGENT_API_URL ?? AGENT_STREAM_URL;
+
 export const MOVE_STEP = 0.5;
 export const VERTICAL_STEP = 0.5;
 export const YAW_STEP_DEGREES = 90;

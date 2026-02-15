@@ -187,6 +187,40 @@ export function useAgentSession() {
         },
       });
       abortRef.current = controller;
+      try {
+        // Create the session via POST
+        const id = await createSession({ query, numAgents });
+        setSessionId(id);
+
+        // Observe it via GET
+        const controller = observeAgentStream({
+          sessionId: id,
+          onEvent: processEvent,
+          onError: (err) => {
+            setError(err.message);
+            setSessionStatus("error");
+          },
+          onComplete: () => {
+            setSessionStatus((s) => (s === "running" ? "complete" : s));
+          },
+        });
+        abortRef.current = controller;
+      } catch (err) {
+        // Fallback: use the legacy single-POST stream
+        const controller = startAgentStream({
+          query,
+          numAgents,
+          onEvent: processEvent,
+          onError: (e) => {
+            setError(e.message);
+            setSessionStatus("error");
+          },
+          onComplete: () => {
+            setSessionStatus((s) => (s === "running" ? "complete" : s));
+          },
+        });
+        abortRef.current = controller;
+      }
     },
     [processEvent],
   );

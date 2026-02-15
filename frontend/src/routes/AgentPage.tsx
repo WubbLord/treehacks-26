@@ -164,6 +164,44 @@ export function AgentPage() {
             );
           })}
         </div>
+              )}
+            </div>
+          </div>
+
+          {/* Agent cards strip */}
+          {agentList.length > 0 && (
+            <div className="agent-cards-strip">
+              {agentList.map((agent) => (
+                <AgentCard
+                  key={agent.agentId}
+                  agent={agent}
+                  isWinner={agent.agentId === winnerAgentId}
+                  isSelected={agent.agentId === selectedAgentId}
+                  onClick={() => selectAgent(agent.agentId)}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* Controls bar */}
+          <div className="agent-controls-bar">
+            {sessionStatus === "running" && !urlSessionId && (
+              <button className="replay-btn" onClick={cancelSession}>
+                CANCEL
+              </button>
+            )}
+            {sessionStatus === "complete" && winnerAgentId !== null && (
+              <span className="agent-success-label">
+                AGENT {winnerAgentId} FOUND TARGET
+              </span>
+            )}
+            {sessionStatus === "complete" && winnerAgentId === null && (
+              <span className="agent-success-label" style={{ color: "var(--swiss-black)" }}>
+                NO TARGET FOUND
+              </span>
+            )}
+          </div>
+        </>
       )}
     </section>
   );
