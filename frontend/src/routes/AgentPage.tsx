@@ -1,4 +1,5 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
+import { useParams } from "react-router-dom";
 import { useAgentSession } from "../hooks/useAgentSession";
 import { QueryInput } from "../components/QueryInput";
 import { AgentCard } from "../components/AgentCard";
@@ -13,16 +14,34 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 export function AgentPage() {
+  const { sessionId: urlSessionId } = useParams<{ sessionId?: string }>();
+
   const {
+    sessionId,
     sessionStatus,
     agents,
     winnerAgentId,
     error,
     selectedAgentId,
     startSession,
+    joinSession,
     cancelSession,
     selectAgent,
   } = useAgentSession();
+
+  // Auto-join session from URL on mount
+  useEffect(() => {
+    if (urlSessionId && sessionStatus === "idle") {
+      joinSession(urlSessionId);
+    }
+  }, [urlSessionId, sessionStatus, joinSession]);
+
+  // Update URL when a new session is created from the query form
+  useEffect(() => {
+    if (sessionId && !urlSessionId) {
+      window.history.replaceState(null, "", `/agent/${sessionId}`);
+    }
+  }, [sessionId, urlSessionId]);
 
   const agentList = useMemo(() => Array.from(agents.values()), [agents]);
   const selectedAgent =
@@ -43,6 +62,13 @@ export function AgentPage() {
     startSession(query, DEFAULT_AGENT_COUNT);
   };
 
+  // Hide query form when viewing a shared session link
+  const showQueryForm =
+    !urlSessionId &&
+    (sessionStatus === "idle" ||
+      sessionStatus === "complete" ||
+      sessionStatus === "error");
+
   return (
     <section className="agent-page">
       {/* Status bar */}
@@ -54,7 +80,7 @@ export function AgentPage() {
       </div>
 
       {/* Query input */}
-      {(sessionStatus === "idle" || sessionStatus === "complete" || sessionStatus === "error") && (
+      {showQueryForm && (
         <QueryInput onSubmit={handleStart} disabled={false} />
       )}
 
@@ -115,7 +141,7 @@ export function AgentPage() {
 
           {/* Controls bar */}
           <div className="agent-controls-bar">
-            {sessionStatus === "running" && (
+            {sessionStatus === "running" && !urlSessionId && (
               <button className="replay-btn" onClick={cancelSession}>
                 CANCEL
               </button>

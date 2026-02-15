@@ -24,7 +24,7 @@ type ImagesManifest = {
 
 const AUTO_TRAJECTORY_URL = "/replay/trajectory.csv";
 const AUTO_MANIFEST_URL = "/replay/images_manifest.json";
-const AUTO_IMAGES_BASE = "/replay/images";
+const AUTO_IMAGES_BASE = "/replay/images_extracted";
 
 function normalizeKey(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9#]+/g, "");

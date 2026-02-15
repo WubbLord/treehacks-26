@@ -21,6 +21,7 @@ export function App() {
         <Routes>
           <Route path="/" element={<LandingPage />} />
           <Route path="/manual" element={<ManualPage />} />
+          <Route path="/agent/:sessionId" element={<AgentPage />} />
           <Route path="/agent" element={<AgentPage />} />
           <Route path="/replay" element={<ReplayPage />} />
         </Routes>
