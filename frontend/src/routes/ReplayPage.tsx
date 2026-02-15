@@ -165,6 +165,7 @@ export function ReplayPage() {
   const [error, setError] = useState("");
   const [autoStatus, setAutoStatus] = useState("Trying default replay assets...");
   const [imageUrl, setImageUrl] = useState("");
+  const [imageLoading, setImageLoading] = useState(false);
 
   const totalFrames = boundRows.length;
   const current = totalFrames > 0 ? boundRows[Math.min(frameIndex, totalFrames - 1)] : null;
@@ -181,8 +182,14 @@ export function ReplayPage() {
   useEffect(() => {
     if (!current?.imageFile) {
       setImageUrl(current?.imageUrl ?? "");
+      if (current?.imageUrl) {
+        setImageLoading(true);
+      } else {
+        setImageLoading(false);
+      }
       return;
     }
+    setImageLoading(true);
     const url = URL.createObjectURL(current.imageFile);
     setImageUrl(url);
     return () => URL.revokeObjectURL(url);
@@ -400,7 +407,19 @@ export function ReplayPage() {
 
       <div className="viewport-card replay-viewport">
         {imageUrl ? (
-          <img className="viewport-image" src={imageUrl} alt="Replay frame" />
+          <>
+            {imageLoading && (
+              <div className="replay-loading">Loading image...</div>
+            )}
+            <img
+              className="viewport-image"
+              src={imageUrl}
+              alt="Replay frame"
+              onLoad={() => setImageLoading(false)}
+              onError={() => setImageLoading(false)}
+              style={{ display: imageLoading ? 'none' : 'block' }}
+            />
+          </>
         ) : (
           <div className="replay-empty">Load trajectory CSV + images to begin replay.</div>
         )}

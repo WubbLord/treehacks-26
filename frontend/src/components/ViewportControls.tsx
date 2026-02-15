@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, ChevronUp, ChevronDown, ArrowUp, ArrowDown } from "lucide-react";
+import { RotateCcw, RotateCw, ArrowUp, ArrowDown } from "lucide-react";
 
 type ViewportControlsProps = {
   onForward: () => void;
@@ -19,39 +19,54 @@ export function ViewportControls({
 }: ViewportControlsProps) {
   return (
     <div className="overlay-controls">
-      <button type="button" className="nav-arrow left" aria-label="Turn left" onClick={onTurnLeft}>
-        <ChevronLeft size={32} strokeWidth={3} />
+      {/* Rotation controls - bottom corners with circular arrows */}
+      <button type="button" className="nav-arrow rotate-left" aria-label="Rotate counter-clockwise" onClick={onTurnLeft} title="Turn Left (CCW)">
+        <RotateCcw size={26} strokeWidth={2.5} />
+        <span className="nav-label">CCW</span>
       </button>
       <button
         type="button"
-        className="nav-arrow right"
-        aria-label="Turn right"
+        className="nav-arrow rotate-right"
+        aria-label="Rotate clockwise"
         onClick={onTurnRight}
+        title="Turn Right (CW)"
       >
-        <ChevronRight size={32} strokeWidth={3} />
+        <RotateCw size={26} strokeWidth={2.5} />
+        <span className="nav-label">CW</span>
       </button>
+
+      {/* Movement controls - center bottom */}
       <button
         type="button"
-        className="nav-arrow center-forward"
+        className="nav-arrow move-forward"
         aria-label="Move forward"
         onClick={onForward}
+        title="Move Forward"
       >
-        <ChevronUp size={32} strokeWidth={3} />
+        <ArrowUp size={28} strokeWidth={3} />
+        <span className="nav-label">FWD</span>
       </button>
       <button
         type="button"
-        className="nav-arrow center-backward"
+        className="nav-arrow move-backward"
         aria-label="Move backward"
         onClick={onBackward}
+        title="Move Backward"
       >
-        <ChevronDown size={32} strokeWidth={3} />
-      </button>
-      <button type="button" className="nav-arrow z-up" aria-label="Move up" onClick={onUp}>
-        <ArrowUp size={28} strokeWidth={3} />
-      </button>
-      <button type="button" className="nav-arrow z-down" aria-label="Move down" onClick={onDown}>
         <ArrowDown size={28} strokeWidth={3} />
+        <span className="nav-label">BACK</span>
       </button>
+
+      {/* Vertical (altitude) controls - top right */}
+      <div className="nav-group altitude">
+        <span className="nav-group-label">ALT</span>
+        <button type="button" className="nav-arrow z-up" aria-label="Move up (altitude)" onClick={onUp} title="Increase Altitude">
+          <ArrowUp size={20} strokeWidth={3} />
+        </button>
+        <button type="button" className="nav-arrow z-down" aria-label="Move down (altitude)" onClick={onDown} title="Decrease Altitude">
+          <ArrowDown size={20} strokeWidth={3} />
+        </button>
+      </div>
     </div>
   );
 }

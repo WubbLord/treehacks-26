@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import { fetchImageForPose } from "../api/images";
 import { MOVE_STEP, VERTICAL_STEP, YAW_STEP_DEGREES } from "../config";
 import { ViewportControls } from "../components/ViewportControls";
@@ -27,9 +27,12 @@ function normalizeYaw(yaw: number): number {
 
 export function ManualPage() {
   const [pose, setPose] = useState<Pose>(initialPose);
-  const [imageSrc, setImageSrc] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  // Crossfade state: two image layers that alternate
+  const [activeLayer, setActiveLayer] = useState<0 | 1>(0);
+  const [imageSources, setImageSources] = useState<[string, string]>(["", ""]);
 
   useEffect(() => {
     let cancelled = false;
@@ -39,13 +42,32 @@ export function ManualPage() {
     fetchImageForPose(pose)
       .then((src) => {
         if (!cancelled) {
-          setImageSrc(src);
+          // Set new image on the inactive layer, then crossfade to it
+          const nextLayer = activeLayer === 0 ? 1 : 0;
+          setImageSources((prev) => {
+            const next: [string, string] = [...prev];
+            next[nextLayer] = src;
+            return next;
+          });
+
+          // Wait a frame for the image to be set, then switch active layer
+          requestAnimationFrame(() => {
+            if (!cancelled) {
+              setActiveLayer(nextLayer);
+            }
+          });
         }
       })
       .catch((err: unknown) => {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Unknown error");
-          setImageSrc(PLACEHOLDER_IMAGE);
+          const nextLayer = activeLayer === 0 ? 1 : 0;
+          setImageSources((prev) => {
+            const next: [string, string] = [...prev];
+            next[nextLayer] = PLACEHOLDER_IMAGE;
+            return next;
+          });
+          setActiveLayer(nextLayer);
         }
       })
       .finally(() => {
@@ -57,7 +79,7 @@ export function ManualPage() {
     return () => {
       cancelled = true;
     };
-  }, [pose]);
+  }, [pose]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const poseLabel = useMemo(
     () =>
@@ -65,7 +87,7 @@ export function ManualPage() {
     [pose],
   );
 
-  const moveByYaw = (step: number) => {
+  const moveByYaw = useCallback((step: number) => {
     setPose((prev) => {
       const radians = (prev.yaw * Math.PI) / 180;
       return {
@@ -74,14 +96,14 @@ export function ManualPage() {
         y: prev.y + Math.sin(radians) * step,
       };
     });
-  };
+  }, []);
 
-  const rotateYaw = (delta: number) => {
+  const rotateYaw = useCallback((delta: number) => {
     setPose((prev) => ({
       ...prev,
       yaw: normalizeYaw(prev.yaw + delta),
     }));
-  };
+  }, []);
 
   return (
     <section className="manual-page">
@@ -92,11 +114,19 @@ export function ManualPage() {
       </div>
 
       <div className="viewport-card">
-        <img
-          className="viewport-image"
-          src={imageSrc || PLACEHOLDER_IMAGE}
-          alt="Rendered world view"
-        />
+        {/* Two image layers for crossfade effect */}
+        <div className="viewport-crossfade">
+          <img
+            className={`viewport-image crossfade-layer ${activeLayer === 0 ? 'active' : ''}`}
+            src={imageSources[0] || PLACEHOLDER_IMAGE}
+            alt="Rendered world view"
+          />
+          <img
+            className={`viewport-image crossfade-layer ${activeLayer === 1 ? 'active' : ''}`}
+            src={imageSources[1] || PLACEHOLDER_IMAGE}
+            alt="Rendered world view"
+          />
+        </div>
         <ViewportControls
           onForward={() => moveByYaw(MOVE_STEP)}
           onBackward={() => moveByYaw(-MOVE_STEP)}

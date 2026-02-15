@@ -435,11 +435,44 @@ body {
   border-bottom: var(--border-4) solid var(--swiss-black);
 }
 
+/* Crossfade container for smooth image transitions */
+.viewport-crossfade {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
 .viewport-image {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+/* Motion blur transition - simulates moving through space */
+.viewport-image.crossfade-layer {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  filter: blur(20px);
+  transform: scale(1.15);
+  transition:
+    opacity 350ms ease-out,
+    filter 350ms ease-out,
+    transform 350ms ease-out;
+  will-change: opacity, filter, transform;
+}
+
+.viewport-image.crossfade-layer.active {
+  opacity: 1;
+  filter: blur(0px);
+  transform: scale(1);
+}
+
+/* Outgoing image - blurs out and zooms slightly */
+.viewport-image.crossfade-layer:not(.active) {
+  transform: scale(0.95);
 }
 
 .overlay-controls {
@@ -454,60 +487,94 @@ body {
   pointer-events: auto;
   width: 64px;
   height: 64px;
-  border: var(--border-4) solid var(--swiss-white);
-  background: rgba(0, 0, 0, 0.5);
+  border: var(--border-2) solid var(--swiss-white);
+  background: rgba(0, 0, 0, 0.6);
   color: var(--swiss-white);
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   font-size: 1.5rem;
   cursor: pointer;
   transition: all var(--transition-instant);
   backdrop-filter: blur(4px);
+  border-radius: 8px;
+  gap: 2px;
+  padding-bottom: 4px;
 }
 
 .nav-arrow:hover {
   background: var(--swiss-accent);
-  border-color: var(--swiss-accent);
-  transform: scale(1.05);
+  border-color: var(--swiss-white);
+  transform: scale(1.08);
 }
 
 .nav-arrow:active {
   transform: scale(0.95);
 }
 
-.nav-arrow.left {
-  top: 50%;
-  left: var(--space-6);
-  transform: translateY(-50%);
+/* Rotation controls - bottom corners with circular arrows */
+.nav-arrow.rotate-left {
+  bottom: var(--space-8);
+  left: var(--space-8);
 }
 
-.nav-arrow.right {
-  top: 50%;
-  right: var(--space-6);
-  transform: translateY(-50%);
+.nav-arrow.rotate-right {
+  bottom: var(--space-8);
+  right: var(--space-8);
 }
 
-.nav-arrow.center-forward {
-  bottom: calc(var(--space-16) + 80px);
+/* Movement controls - center bottom, stacked vertically */
+.nav-arrow.move-forward {
+  bottom: calc(var(--space-8) + 72px);
   left: 50%;
   transform: translateX(-50%);
 }
 
-.nav-arrow.center-backward {
-  bottom: var(--space-16);
+.nav-arrow.move-backward {
+  bottom: var(--space-8);
   left: 50%;
   transform: translateX(-50%);
 }
 
-.nav-arrow.z-up {
+/* Altitude control group - top right */
+.nav-group.altitude {
+  position: absolute;
   top: var(--space-6);
   right: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  pointer-events: auto;
 }
 
-.nav-arrow.z-down {
-  top: calc(var(--space-6) + 80px);
-  right: var(--space-6);
+.nav-group-label {
+  font-size: 0.625rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--swiss-white);
+  background: rgba(0, 0, 0, 0.7);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.nav-group .nav-arrow {
+  position: relative;
+  width: 48px;
+  height: 48px;
+}
+
+/* Button labels */
+.nav-label {
+  font-size: 0.5625rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  opacity: 0.9;
+  line-height: 1;
 }
 
 /* ============================================
@@ -640,6 +707,22 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   background: var(--swiss-muted);
+}
+
+.replay-loading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--swiss-white);
+  font-size: 1rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background: rgba(0, 0, 0, 0.85);
+  padding: var(--space-4) var(--space-6);
+  border: var(--border-2) solid var(--swiss-white);
+  z-index: 10;
 }
 
 .replay-coords {
