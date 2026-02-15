@@ -104,7 +104,7 @@ def reproject_novel_view(
     z0 = z[valid0]
 
     X = (pix0 @ Kinv.T) * z0[:, None]
-    Xp = (X @ R.T) + t.reshape(1, 3)
+    Xp = (X - t.reshape(1, 3)) @ R.T
     zp = Xp[:, 2]
     valid1 = zp > 1e-6
     Xp = Xp[valid1]
@@ -158,9 +158,12 @@ def run_view_transform(
     yaw_deg: float = 10.0,
     pitch_deg: float = 0.0,
     roll_deg: float = 0.0,
-    back_ft: float = 2.0,
-    right_ft: float = 0.0,
-    down_ft: float = 0.0,
+    back: float = 0.0,
+    forward: float = 0.0,
+    right: float = 0.0,
+    left: float = 0.0,
+    down: float = 0.0,
+    up: float = 0.0,
     inpaint_radius: int = 3,
     save_depth_vis: bool = False,
     save_holes: bool = False,
@@ -224,8 +227,7 @@ def run_view_transform(
     K = build_K(W, H, focallength_px)
 
     R = rot_y(yaw_deg) @ rot_x(pitch_deg) @ rot_z(roll_deg)
-    ft2m = 0.3048
-    t = np.array([right_ft * ft2m, down_ft * ft2m, back_ft * ft2m], dtype=np.float32)
+    t = np.array([right - left, down - up, forward - back], dtype=np.float32)
 
     out_bgr, holes_mask = reproject_novel_view(
         I_bgr=I_bgr, D=depth_m, K=K, R=R, t=t, inpaint_radius=inpaint_radius
@@ -260,9 +262,12 @@ def main(
     yaw_deg: float = 10.0,
     pitch_deg: float = 0.0,
     roll_deg: float = 0.0,
-    back_ft: float = 2.0,
-    right_ft: float = 0.0,
-    down_ft: float = 0.0,
+    back: float = 0.0,
+    forward: float = 0.0,
+    right: float = 0.0,
+    left: float = 0.0,
+    down: float = 0.0,
+    up: float = 0.0,
     inpaint_radius: int = 3,
     save_depth_vis: bool = False,
     save_holes: bool = False,
@@ -275,7 +280,7 @@ def main(
 
     Usage:
         modal run view_transform_modal.py --input input.png --output out.png
-        modal run view_transform_modal.py --input input.png --output out.png --yaw-deg 15 --back-ft 3
+        modal run view_transform_modal.py --input input.png --output out.png --yaw-deg 15 --forward 0.5
     """
     inp = Path(input)
     outp = Path(output)
@@ -303,9 +308,12 @@ def main(
         yaw_deg=yaw_deg,
         pitch_deg=pitch_deg,
         roll_deg=roll_deg,
-        back_ft=back_ft,
-        right_ft=right_ft,
-        down_ft=down_ft,
+        back=back,
+        forward=forward,
+        right=right,
+        left=left,
+        down=down,
+        up=up,
         inpaint_radius=inpaint_radius,
         save_depth_vis=save_depth_vis,
         save_holes=save_holes,
