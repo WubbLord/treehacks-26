@@ -11,14 +11,37 @@ const initialPose: Pose = {
   yaw: 0,
 };
 
-const PLACEHOLDER_IMAGE = `data:image/svg+xml;utf8,${encodeURIComponent(
-  `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700">
-    <rect width="1200" height="700" fill="#d8e2ef"/>
-    <rect x="36" y="36" width="1128" height="628" rx="20" fill="#eef3f9" stroke="#b8c4d7" stroke-width="3"/>
-    <text x="600" y="330" text-anchor="middle" font-family="Roboto, Arial, sans-serif" font-size="42" fill="#5b6f89">Image placeholder</text>
-    <text x="600" y="382" text-anchor="middle" font-family="Roboto, Arial, sans-serif" font-size="23" fill="#7a8ca3">/getImages unavailable or empty</text>
-  </svg>`,
-)}`;
+const LOADING_MESSAGES = [
+  "Rendering reality...",
+  "Asking the pixels nicely...",
+  "Convincing photons to cooperate...",
+  "Downloading more RAM...",
+  "Bribing the server hamsters...",
+  "Untangling the internet...",
+  "Waiting for the universe to buffer...",
+  "Teaching AI to see...",
+  "Politely requesting data...",
+  "Summoning images from the void...",
+];
+
+function LoadingPlaceholder() {
+  const [messageIndex, setMessageIndex] = useState(0);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setMessageIndex((i) => (i + 1) % LOADING_MESSAGES.length);
+    }, 2000);
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    <div className="loading-placeholder">
+      <div className="loading-spinner" />
+      <p className="loading-message">{LOADING_MESSAGES[messageIndex]}</p>
+      <p className="loading-hint">WASD to move • Q/E to rotate • Space/Shift for altitude</p>
+    </div>
+  );
+}
 
 function normalizeYaw(yaw: number): number {
   const normalized = yaw % 360;
@@ -61,13 +84,7 @@ export function ManualPage() {
       .catch((err: unknown) => {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Unknown error");
-          const nextLayer = activeLayer === 0 ? 1 : 0;
-          setImageSources((prev) => {
-            const next: [string, string] = [...prev];
-            next[nextLayer] = PLACEHOLDER_IMAGE;
-            return next;
-          });
-          setActiveLayer(nextLayer);
+          // Keep showing loading placeholder or last valid image on error
         }
       })
       .finally(() => {
@@ -98,12 +115,81 @@ export function ManualPage() {
     });
   }, []);
 
+  // Strafe left/right (perpendicular to yaw direction)
+  const strafeByYaw = useCallback((step: number) => {
+    setPose((prev) => {
+      const radians = (prev.yaw * Math.PI) / 180;
+      // Perpendicular direction: rotate 90 degrees
+      return {
+        ...prev,
+        x: prev.x + Math.cos(radians + Math.PI / 2) * step,
+        y: prev.y + Math.sin(radians + Math.PI / 2) * step,
+      };
+    });
+  }, []);
+
   const rotateYaw = useCallback((delta: number) => {
     setPose((prev) => ({
       ...prev,
       yaw: normalizeYaw(prev.yaw + delta),
     }));
   }, []);
+
+  const moveUp = useCallback(() => {
+    setPose((prev) => ({ ...prev, z: prev.z + VERTICAL_STEP }));
+  }, []);
+
+  const moveDown = useCallback(() => {
+    setPose((prev) => ({ ...prev, z: prev.z - VERTICAL_STEP }));
+  }, []);
+
+  // Keyboard controls
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore if user is typing in an input
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      switch (e.key.toLowerCase()) {
+        case 'w':
+          e.preventDefault();
+          moveByYaw(MOVE_STEP);
+          break;
+        case 's':
+          e.preventDefault();
+          moveByYaw(-MOVE_STEP);
+          break;
+        case 'a':
+          e.preventDefault();
+          strafeByYaw(MOVE_STEP);
+          break;
+        case 'd':
+          e.preventDefault();
+          strafeByYaw(-MOVE_STEP);
+          break;
+        case 'q':
+          e.preventDefault();
+          rotateYaw(-YAW_STEP_DEGREES);
+          break;
+        case 'e':
+          e.preventDefault();
+          rotateYaw(YAW_STEP_DEGREES);
+          break;
+        case ' ':
+          e.preventDefault();
+          moveUp();
+          break;
+        case 'shift':
+          e.preventDefault();
+          moveDown();
+          break;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [moveByYaw, strafeByYaw, rotateYaw, moveUp, moveDown]);
 
   return (
     <section className="manual-page">
@@ -114,34 +200,30 @@ export function ManualPage() {
       </div>
 
       <div className="viewport-card">
-        {/* Two image layers for crossfade effect */}
-        <div className="viewport-crossfade">
-          <img
-            className={`viewport-image crossfade-layer ${activeLayer === 0 ? 'active' : ''}`}
-            src={imageSources[0] || PLACEHOLDER_IMAGE}
-            alt="Rendered world view"
-          />
-          <img
-            className={`viewport-image crossfade-layer ${activeLayer === 1 ? 'active' : ''}`}
-            src={imageSources[1] || PLACEHOLDER_IMAGE}
-            alt="Rendered world view"
-          />
-        </div>
+        {/* Show loading placeholder when no images loaded yet */}
+        {!imageSources[0] && !imageSources[1] ? (
+          <LoadingPlaceholder />
+        ) : (
+          <div className="viewport-crossfade">
+            <img
+              className={`viewport-image crossfade-layer ${activeLayer === 0 ? 'active' : ''}`}
+              src={imageSources[0]}
+              alt="Rendered world view"
+            />
+            <img
+              className={`viewport-image crossfade-layer ${activeLayer === 1 ? 'active' : ''}`}
+              src={imageSources[1]}
+              alt="Rendered world view"
+            />
+          </div>
+        )}
         <ViewportControls
           onForward={() => moveByYaw(MOVE_STEP)}
           onBackward={() => moveByYaw(-MOVE_STEP)}
-          onUp={() =>
-            setPose((prev) => ({
-              ...prev,
-              z: prev.z + VERTICAL_STEP,
-            }))
-          }
-          onDown={() =>
-            setPose((prev) => ({
-              ...prev,
-              z: prev.z - VERTICAL_STEP,
-            }))
-          }
+          onLeft={() => strafeByYaw(MOVE_STEP)}
+          onRight={() => strafeByYaw(-MOVE_STEP)}
+          onUp={moveUp}
+          onDown={moveDown}
           onTurnLeft={() => rotateYaw(-YAW_STEP_DEGREES)}
           onTurnRight={() => rotateYaw(YAW_STEP_DEGREES)}
         />

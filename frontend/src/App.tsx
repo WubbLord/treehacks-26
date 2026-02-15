@@ -13,7 +13,7 @@ export function App() {
     <div className="app-shell">
       {!isLanding && (
         <header className="top-bar">
-          <h1 className="title">World Viewer</h1>
+          <h1 className="title">Keryx</h1>
           <ModeSwitch />
         </header>
       )}

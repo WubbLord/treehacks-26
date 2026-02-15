@@ -1,8 +1,10 @@
-import { RotateCcw, RotateCw, ArrowUp, ArrowDown } from "lucide-react";
+import { RotateCcw, RotateCw, ArrowUp, ArrowDown, ArrowLeft, ArrowRight } from "lucide-react";
 
 type ViewportControlsProps = {
   onForward: () => void;
   onBackward: () => void;
+  onLeft: () => void;
+  onRight: () => void;
   onUp: () => void;
   onDown: () => void;
   onTurnLeft: () => void;
@@ -12,6 +14,8 @@ type ViewportControlsProps = {
 export function ViewportControls({
   onForward,
   onBackward,
+  onLeft,
+  onRight,
   onUp,
   onDown,
   onTurnLeft,
@@ -35,7 +39,7 @@ export function ViewportControls({
         <span className="nav-label">CW</span>
       </button>
 
-      {/* Movement controls - center bottom */}
+      {/* Movement controls - center bottom (WASD-style layout) */}
       <button
         type="button"
         className="nav-arrow move-forward"
@@ -48,6 +52,16 @@ export function ViewportControls({
       </button>
       <button
         type="button"
+        className="nav-arrow move-left"
+        aria-label="Strafe left"
+        onClick={onLeft}
+        title="Strafe Left"
+      >
+        <ArrowLeft size={28} strokeWidth={3} />
+        <span className="nav-label">LEFT</span>
+      </button>
+      <button
+        type="button"
         className="nav-arrow move-backward"
         aria-label="Move backward"
         onClick={onBackward}
@@ -55,6 +69,16 @@ export function ViewportControls({
       >
         <ArrowDown size={28} strokeWidth={3} />
         <span className="nav-label">BACK</span>
+      </button>
+      <button
+        type="button"
+        className="nav-arrow move-right"
+        aria-label="Strafe right"
+        onClick={onRight}
+        title="Strafe Right"
+      >
+        <ArrowRight size={28} strokeWidth={3} />
+        <span className="nav-label">RIGHT</span>
       </button>
 
       {/* Vertical (altitude) controls - top right */}

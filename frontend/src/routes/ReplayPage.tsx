@@ -165,7 +165,6 @@ export function ReplayPage() {
   const [error, setError] = useState("");
   const [autoStatus, setAutoStatus] = useState("Trying default replay assets...");
   const [imageUrl, setImageUrl] = useState("");
-  const [imageLoading, setImageLoading] = useState(false);
 
   const totalFrames = boundRows.length;
   const current = totalFrames > 0 ? boundRows[Math.min(frameIndex, totalFrames - 1)] : null;
@@ -182,14 +181,8 @@ export function ReplayPage() {
   useEffect(() => {
     if (!current?.imageFile) {
       setImageUrl(current?.imageUrl ?? "");
-      if (current?.imageUrl) {
-        setImageLoading(true);
-      } else {
-        setImageLoading(false);
-      }
       return;
     }
-    setImageLoading(true);
     const url = URL.createObjectURL(current.imageFile);
     setImageUrl(url);
     return () => URL.revokeObjectURL(url);
@@ -327,99 +320,14 @@ export function ReplayPage() {
 
   return (
     <section className="replay-page">
-      <div className="status-bar">
-        <span className="pose">{progressLabel}</span>
-        <span className="status">{autoStatus}</span>
-        {!!error && <span className="status error">{error}</span>}
-      </div>
-
-      <div className="replay-tools">
-        <label className="replay-input">
-          Trajectory CSV
-          <input
-            type="file"
-            accept=".csv,text/csv"
-            onChange={(e) => onTrajectoryFile(e.target.files?.[0] ?? null)}
-          />
-        </label>
-        <label className="replay-input">
-          Frame Images
-          <input
-            type="file"
-            accept=".png,.jpg,.jpeg,.webp"
-            multiple
-            onChange={(e) => onImagesSelected(e.target.files)}
-          />
-        </label>
-      </div>
-
-      <div className="replay-controls">
-        <button type="button" className="replay-btn" onClick={() => void tryLoadDefaults()}>
-          Reload Defaults
-        </button>
-        <button
-          type="button"
-          className="replay-btn"
-          onClick={() => setPlaying((p) => !p)}
-          disabled={totalFrames <= 1}
-        >
-          {playing ? "Pause" : "Play"}
-        </button>
-        <button
-          type="button"
-          className="replay-btn"
-          onClick={() => setFrameIndex((i) => Math.max(0, i - 1))}
-          disabled={totalFrames === 0}
-        >
-          Prev
-        </button>
-        <button
-          type="button"
-          className="replay-btn"
-          onClick={() => setFrameIndex((i) => Math.min(totalFrames - 1, i + 1))}
-          disabled={totalFrames === 0}
-        >
-          Next
-        </button>
-        <label className="replay-fps">
-          FPS
-          <input
-            type="number"
-            min={1}
-            max={120}
-            value={fps}
-            onChange={(e) => setFps(Math.max(1, parseInt(e.target.value || "1", 10)))}
-          />
-        </label>
-      </div>
-
-      <div className="replay-slider-wrap">
-        <input
-          className="replay-slider"
-          type="range"
-          min={0}
-          max={Math.max(0, totalFrames - 1)}
-          value={Math.min(frameIndex, Math.max(0, totalFrames - 1))}
-          onChange={(e) => setFrameIndex(parseInt(e.target.value, 10))}
-          disabled={totalFrames === 0}
-        />
-      </div>
-
+      {/* Viewport takes most of the space */}
       <div className="viewport-card replay-viewport">
         {imageUrl ? (
-          <>
-            {imageLoading && (
-              <div className="replay-loading">Loading image...</div>
-            )}
-            <img
-              className="viewport-image"
-              src={imageUrl}
-              alt="Replay frame"
-              onLoad={() => setImageLoading(false)}
-              onError={() => setImageLoading(false)}
-              style={{ display: imageLoading ? 'none' : 'block' }}
-            />
-          </>
+          <img
+            className="viewport-image"
+            src={imageUrl}
+            alt="Replay frame"
+          />
         ) : (
           <div className="replay-empty">Load trajectory CSV + images to begin replay.</div>
         )}
@@ -430,6 +338,86 @@ export function ReplayPage() {
             <div>z: {current.z.toFixed(3)} m</div>
           </div>
         )}
+        {/* Status overlay */}
+        <div className="replay-status-overlay">
+          <span className="pose">{progressLabel}</span>
+          {!!error && <span className="status error">{error}</span>}
+        </div>
+      </div>
+
+      {/* Controls bar at bottom */}
+      <div className="replay-bottom-bar">
+        <div className="replay-slider-wrap">
+          <input
+            className="replay-slider"
+            type="range"
+            min={0}
+            max={Math.max(0, totalFrames - 1)}
+            value={Math.min(frameIndex, Math.max(0, totalFrames - 1))}
+            onChange={(e) => setFrameIndex(parseInt(e.target.value, 10))}
+            disabled={totalFrames === 0}
+          />
+        </div>
+
+        <div className="replay-controls">
+          <button type="button" className="replay-btn" onClick={() => void tryLoadDefaults()}>
+            Reload
+          </button>
+          <button
+            type="button"
+            className="replay-btn"
+            onClick={() => setPlaying((p) => !p)}
+            disabled={totalFrames <= 1}
+          >
+            {playing ? "Pause" : "Play"}
+          </button>
+          <button
+            type="button"
+            className="replay-btn"
+            onClick={() => setFrameIndex((i) => Math.max(0, i - 1))}
+            disabled={totalFrames === 0}
+          >
+            Prev
+          </button>
+          <button
+            type="button"
+            className="replay-btn"
+            onClick={() => setFrameIndex((i) => Math.min(totalFrames - 1, i + 1))}
+            disabled={totalFrames === 0}
+          >
+            Next
+          </button>
+          <label className="replay-fps">
+            FPS
+            <input
+              type="number"
+              min={1}
+              max={120}
+              value={fps}
+              onChange={(e) => setFps(Math.max(1, parseInt(e.target.value || "1", 10)))}
+            />
+          </label>
+
+          <div className="replay-tools">
+            <label className="replay-input">
+              Upload CSV
+              <input
+                type="file"
+                accept=".csv,text/csv"
+                onChange={(e) => onTrajectoryFile(e.target.files?.[0] ?? null)}
+              />
+            </label>
+            <label className="replay-input">
+              Upload Images
+              <input
+                type="file"
+                accept=".png,.jpg,.jpeg,.webp"
+                multiple
+                onChange={(e) => onImagesSelected(e.target.files)}
+              />
+            </label>
+          </div>
+        </div>
       </div>
     </section>
   );
