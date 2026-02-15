@@ -27,7 +27,7 @@ app = modal.App("keryx")
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("libgl1", "libglib2.0-0")
+    .apt_install("libgl1", "libglib2.0-0", "ffmpeg")
     .pip_install(
         "torch",
         "torchvision",

@@ -12,7 +12,7 @@ import time
 import uuid
 
 import modal
-from starlette.responses import StreamingResponse, Response
+# from starlette.responses import StreamingResponse, Response
 
 # ---------------------------------------------------------------------------
 # Model registry – add new vision-language models here
