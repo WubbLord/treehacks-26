@@ -1,133 +1,138 @@
-import { Bot, Zap, Target } from "lucide-react";
+import { useMemo } from "react";
+import { useAgentSession } from "../hooks/useAgentSession";
+import { QueryInput } from "../components/QueryInput";
+import { AgentCard } from "../components/AgentCard";
+import { AgentTrajectoryMap } from "../components/AgentTrajectoryMap";
+import { DEFAULT_AGENT_COUNT } from "../config";
+
+const STATUS_LABELS: Record<string, string> = {
+  idle: "READY",
+  running: "SEARCHING...",
+  complete: "COMPLETE",
+  error: "ERROR",
+};
 
 export function AgentPage() {
+  const {
+    sessionStatus,
+    agents,
+    winnerAgentId,
+    error,
+    selectedAgentId,
+    startSession,
+    cancelSession,
+    selectAgent,
+  } = useAgentSession();
+
+  const agentList = useMemo(() => Array.from(agents.values()), [agents]);
+  const selectedAgent =
+    selectedAgentId !== null ? agents.get(selectedAgentId) : undefined;
+  const latestStep = selectedAgent?.steps[selectedAgent.steps.length - 1];
+
+  const trajectories = useMemo(
+    () =>
+      agentList.map((a) => ({
+        agentId: a.agentId,
+        points: a.trajectory.map((t) => ({ x: t.x, y: t.y, step: t.step })),
+        isWinner: a.agentId === winnerAgentId,
+      })),
+    [agentList, winnerAgentId],
+  );
+
+  const handleStart = (query: string) => {
+    startSession(query, DEFAULT_AGENT_COUNT);
+  };
+
   return (
     <section className="agent-page">
+      {/* Status bar */}
       <div className="status-bar">
         <span className="pose">AGENT MODE</span>
-        <span className="status">SYSTEM INITIALIZING</span>
+        <span className={`status ${sessionStatus === "error" ? "error" : ""}`}>
+          {error || STATUS_LABELS[sessionStatus] || sessionStatus.toUpperCase()}
+        </span>
       </div>
 
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          minHeight: "60vh",
-          padding: "var(--space-16) var(--space-8)",
-          gap: "var(--space-8)",
-          background: "var(--swiss-muted)",
-          borderBottom: "var(--border-4) solid var(--swiss-black)",
-        }}
-        className="swiss-grid-pattern"
-      >
-        <div
-          style={{
-            width: "120px",
-            height: "120px",
-            border: "var(--border-4) solid var(--swiss-black)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "var(--swiss-white)",
-          }}
-        >
-          <Bot size={64} strokeWidth={2} />
-        </div>
+      {/* Query input */}
+      {(sessionStatus === "idle" || sessionStatus === "complete" || sessionStatus === "error") && (
+        <QueryInput onSubmit={handleStart} disabled={false} />
+      )}
 
-        <h2
-          style={{
-            fontSize: "clamp(2rem, 5vw, 3.5rem)",
-            fontWeight: 900,
-            textTransform: "uppercase",
-            letterSpacing: "-0.02em",
-            margin: 0,
-            textAlign: "center",
-          }}
-        >
-          AUTONOMOUS MODE
-        </h2>
+      {/* Main content — visible when session has started */}
+      {sessionStatus !== "idle" && (
+        <>
+          {/* Viewport */}
+          <div className="agent-viewport">
+            <div className="viewport-card">
+              {latestStep ? (
+                <>
+                  <img
+                    className="viewport-image"
+                    src={latestStep.imageSrc}
+                    alt="Agent view"
+                  />
 
-        <p
-          style={{
-            fontSize: "1.125rem",
-            maxWidth: "40rem",
-            textAlign: "center",
-            lineHeight: 1.6,
-          }}
-        >
-          AI-driven navigation system currently under development. The agent will
-          utilize learned policies for intelligent pathfinding and autonomous
-          exploration of reconstructed environments.
-        </p>
+                  {/* Reasoning overlay */}
+                  <div className="agent-reasoning-overlay">
+                    {latestStep.reasoning}
+                  </div>
 
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
-            gap: "var(--space-6)",
-            width: "100%",
-            maxWidth: "800px",
-            marginTop: "var(--space-8)",
-          }}
-        >
-          <div
-            style={{
-              padding: "var(--space-6)",
-              border: "var(--border-2) solid var(--swiss-black)",
-              background: "var(--swiss-white)",
-              display: "flex",
-              flexDirection: "column",
-              gap: "var(--space-3)",
-            }}
-          >
-            <Zap size={32} strokeWidth={2} />
-            <h3
-              style={{
-                fontSize: "1rem",
-                fontWeight: 900,
-                textTransform: "uppercase",
-                letterSpacing: "-0.01em",
-                margin: 0,
-              }}
-            >
-              REAL-TIME
-            </h3>
-            <p style={{ fontSize: "0.875rem", margin: 0, opacity: 0.8 }}>
-              Millisecond decision latency
-            </p>
+                  {/* Trajectory map overlay */}
+                  {trajectories.some((t) => t.points.length > 0) && (
+                    <div className="agent-map-overlay">
+                      <AgentTrajectoryMap trajectories={trajectories} />
+                    </div>
+                  )}
+
+                  {/* Found banner */}
+                  {selectedAgent?.status === "found" && (
+                    <div className="agent-found-banner">TARGET FOUND</div>
+                  )}
+                </>
+              ) : (
+                <div className="loading-placeholder">
+                  <div className="loading-spinner" />
+                  <p className="loading-message">Agents initializing...</p>
+                </div>
+              )}
+            </div>
           </div>
 
-          <div
-            style={{
-              padding: "var(--space-6)",
-              border: "var(--border-2) solid var(--swiss-black)",
-              background: "var(--swiss-white)",
-              display: "flex",
-              flexDirection: "column",
-              gap: "var(--space-3)",
-            }}
-          >
-            <Target size={32} strokeWidth={2} />
-            <h3
-              style={{
-                fontSize: "1rem",
-                fontWeight: 900,
-                textTransform: "uppercase",
-                letterSpacing: "-0.01em",
-                margin: 0,
-              }}
-            >
-              PRECISION
-            </h3>
-            <p style={{ fontSize: "0.875rem", margin: 0, opacity: 0.8 }}>
-              Sub-centimeter accuracy
-            </p>
+          {/* Agent cards strip */}
+          {agentList.length > 0 && (
+            <div className="agent-cards-strip">
+              {agentList.map((agent) => (
+                <AgentCard
+                  key={agent.agentId}
+                  agent={agent}
+                  isWinner={agent.agentId === winnerAgentId}
+                  isSelected={agent.agentId === selectedAgentId}
+                  onClick={() => selectAgent(agent.agentId)}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* Controls bar */}
+          <div className="agent-controls-bar">
+            {sessionStatus === "running" && (
+              <button className="replay-btn" onClick={cancelSession}>
+                CANCEL
+              </button>
+            )}
+            {sessionStatus === "complete" && winnerAgentId !== null && (
+              <span className="agent-success-label">
+                AGENT {winnerAgentId} FOUND TARGET
+              </span>
+            )}
+            {sessionStatus === "complete" && winnerAgentId === null && (
+              <span className="agent-success-label" style={{ color: "var(--swiss-black)" }}>
+                NO TARGET FOUND
+              </span>
+            )}
           </div>
-        </div>
-      </div>
+        </>
+      )}
     </section>
   );
 }
-

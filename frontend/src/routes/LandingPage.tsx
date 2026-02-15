@@ -9,16 +9,14 @@ export function LandingPage() {
         <div className="hero-content">
           <span className="hero-label">01. SYSTEM</span>
           <h1 className="hero-title">
-            WORLD
-            <br />
-            VIEWER
+            KERYX
           </h1>
           <p className="hero-description">
             A precision navigation system for spatial trajectory visualization.
             Real-time pose estimation with 6-DOF tracking. Engineered for
             accuracy, built for exploration.
           </p>
-          <Link to="/manual" className="hero-cta">
+          <Link to="/agent" className="hero-cta">
             Launch System
             <ArrowRight size={20} strokeWidth={2.5} />
           </Link>
@@ -84,18 +82,6 @@ export function LandingPage() {
         </div>
 
         <div className="features-grid">
-          <Link to="/manual" className="feature-card" style={{ textDecoration: "none", color: "inherit" }}>
-            <div className="feature-icon">
-              <Map size={28} strokeWidth={2} />
-            </div>
-            <h3 className="feature-title">Manual Control</h3>
-            <p className="feature-description">
-              Direct pose manipulation with 6-DOF freedom. Navigate three-dimensional
-              space with precision keyboard controls. Real-time image synthesis from
-              arbitrary viewpoints.
-            </p>
-          </Link>
-
           <Link to="/agent" className="feature-card" style={{ textDecoration: "none", color: "inherit" }}>
             <div className="feature-icon">
               <Gauge size={28} strokeWidth={2} />
@@ -105,6 +91,18 @@ export function LandingPage() {
               Autonomous navigation through learned policies. Intelligent pathfinding
               and obstacle avoidance. AI-driven exploration of reconstructed
               environments.
+            </p>
+          </Link>
+
+          <Link to="/manual" className="feature-card" style={{ textDecoration: "none", color: "inherit" }}>
+            <div className="feature-icon">
+              <Map size={28} strokeWidth={2} />
+            </div>
+            <h3 className="feature-title">Manual Control</h3>
+            <p className="feature-description">
+              Direct pose manipulation with 6-DOF freedom. Navigate three-dimensional
+              space with precision keyboard controls. Real-time image synthesis from
+              arbitrary viewpoints.
             </p>
           </Link>
 
