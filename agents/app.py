@@ -51,10 +51,15 @@ image = (
         copy=True,
     )
     .run_commands("cd /root && pip install -e .")
-    # Bake trajectory data + video into the container
+    # Bake data files into the container
     .add_local_file(
-        str(_DATA / "trajectory_coordinates.csv"),
-        "/data/trajectory.csv",
+        str(_DATA / "timestamp_coordinates.csv"),
+        "/data/timestamp_coordinates.csv",
+        copy=True,
+    )
+    .add_local_file(
+        str(_DATA / "gyro.csv"),
+        "/data/gyro.csv",
         copy=True,
     )
     .add_local_file(
@@ -113,49 +118,60 @@ def reproject_novel_view(
     t: np.ndarray,
     inpaint_radius: int = 3,
 ):
-    """Reproject source image to a novel viewpoint (from view_transform_modal.py)."""
+    """Reproject source image to a novel viewpoint using GPU acceleration."""
     import cv2
+    import torch
 
     H, W = D.shape
-    Kinv = np.linalg.inv(K).astype(np.float32)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    uu, vv = np.meshgrid(
-        np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32)
+    # Move matrices to GPU
+    K_t = torch.from_numpy(K).to(device)
+    Kinv_t = torch.inverse(K_t)
+    R_t = torch.from_numpy(R).to(device)
+    t_t = torch.from_numpy(t).to(device).reshape(1, 3)
+
+    # Build pixel grid on GPU
+    uu, vv = torch.meshgrid(
+        torch.arange(W, dtype=torch.float32, device=device),
+        torch.arange(H, dtype=torch.float32, device=device),
+        indexing="xy",
     )
-    ones = np.ones_like(uu, dtype=np.float32)
-    pix = np.stack([uu, vv, ones], axis=-1).reshape(-1, 3)
-    z = D.reshape(-1).astype(np.float32)
+    pix = torch.stack([uu, vv, torch.ones_like(uu)], dim=-1).reshape(-1, 3)
+    z = torch.from_numpy(D.astype(np.float32)).to(device).reshape(-1)
 
-    valid0 = np.isfinite(z) & (z > 1e-6)
-    idx0 = np.where(valid0)[0]
+    valid0 = torch.isfinite(z) & (z > 1e-6)
+    idx0 = torch.where(valid0)[0]
     pix0, z0 = pix[valid0], z[valid0]
 
-    X = (pix0 @ Kinv.T) * z0[:, None]
-    Xp = (X - t.reshape(1, 3)) @ R.T
+    # Back-project, transform, forward-project — all on GPU
+    X = (pix0 @ Kinv_t.T) * z0[:, None]
+    Xp = (X - t_t) @ R_t.T
     zp = Xp[:, 2]
     valid1 = zp > 1e-6
     Xp, zp, src_idx = Xp[valid1], zp[valid1], idx0[valid1]
 
-    proj = Xp @ K.T
+    proj = Xp @ K_t.T
     up = proj[:, 0] / (proj[:, 2] + 1e-8)
     vp = proj[:, 1] / (proj[:, 2] + 1e-8)
-    ui = np.round(up).astype(np.int32)
-    vi = np.round(vp).astype(np.int32)
+    ui = torch.round(up).to(torch.int64)
+    vi = torch.round(vp).to(torch.int64)
 
     valid2 = (ui >= 0) & (ui < W) & (vi >= 0) & (vi < H)
-    ui, vi, zp, src_idx = (
-        ui[valid2],
-        vi[valid2],
-        zp[valid2],
-        src_idx[valid2],
-    )
+    ui, vi, zp, src_idx = ui[valid2], vi[valid2], zp[valid2], src_idx[valid2]
 
     lin = vi * W + ui
-    order = np.argsort(zp)
-    lin_s, src_s = lin[order], src_idx[order]
-    unique_lin, first_pos = np.unique(lin_s, return_index=True)
-    chosen_src = src_s[first_pos]
 
+    # Z-buffer resolve: sort by depth, first occurrence per pixel = closest
+    order = torch.argsort(zp)
+    lin_s = lin[order]
+    src_s = src_idx[order]
+    mask = torch.ones(lin_s.shape[0], dtype=torch.bool, device=device)
+    mask[1:] = lin_s[1:] != lin_s[:-1]
+    unique_lin = lin_s[mask].cpu().numpy()
+    chosen_src = src_s[mask].cpu().numpy()
+
+    # Scatter to output (CPU — needed for cv2.inpaint anyway)
     out = np.zeros_like(I_bgr)
     filled = np.zeros(H * W, dtype=bool)
     out.reshape(-1, 3)[unique_lin] = I_bgr.reshape(-1, 3)[chosen_src]
@@ -175,25 +191,70 @@ def reproject_novel_view(
 
 
 def _load_database() -> list[dict]:
-    """Load trajectory metadata from the trajectory CSV.
+    """Build trajectory database by merging timestamp_coordinates.csv and gyro.csv.
+
+    timestamp_coordinates.csv provides sparse (x, y, z) waypoints at key timestamps.
+    gyro.csv provides dense orientation (yaw, pitch, roll) at ~1ms intervals.
+
+    For each gyro row whose timestamp falls within the range of the coordinate
+    waypoints, we linearly interpolate x/y/z between the two surrounding
+    waypoints and combine with the gyro orientation.
 
     Returns a list of dicts with keys: x, y, z, yaw, pitch, roll, timestamp_s.
-    Timestamps map directly to video timestamps for frame extraction.
     """
-    traj: list[dict] = []
-    with open("/data/trajectory.csv") as f:
+    import bisect
+
+    # 1. Load sparse position waypoints
+    waypoint_ts: list[float] = []
+    waypoint_x: list[float] = []
+    waypoint_y: list[float] = []
+    waypoint_z: list[float] = []
+    with open("/data/timestamp_coordinates.csv") as f:
         for row in csv.DictReader(f):
-            traj.append(
-                {
-                    "timestamp_s": float(row["timestamp_s"]),
-                    "x": float(row["x_m"]),
-                    "y": float(row["y_m"]),
-                    "z": float(row["z_m"]),
-                    "pitch": float(row["pitch_deg"]),
-                    "yaw": float(row["yaw_deg"]),
-                    "roll": float(row["roll_deg"]),
-                }
-            )
+            waypoint_ts.append(float(row["timestamp"]))
+            waypoint_x.append(float(row["x"]))
+            waypoint_y.append(float(row["y"]))
+            waypoint_z.append(float(row["z"]))
+
+    wp_min, wp_max = waypoint_ts[0], waypoint_ts[-1]
+
+    # 2. Load gyro orientation data, sampling every ~10ms
+    SAMPLE_INTERVAL = 0.010  # 10 ms
+    next_sample_t = wp_min
+    traj: list[dict] = []
+    with open("/data/gyro.csv") as f:
+        for row in csv.DictReader(f):
+            t = float(row["timestamp_s"])
+
+            if t < wp_min or t > wp_max:
+                continue
+            if t < next_sample_t:
+                continue
+            next_sample_t = t + SAMPLE_INTERVAL
+
+            # Find surrounding waypoints for interpolation
+            i = bisect.bisect_right(waypoint_ts, t) - 1
+            i = max(0, min(i, len(waypoint_ts) - 2))
+
+            t0, t1 = waypoint_ts[i], waypoint_ts[i + 1]
+            dt = t1 - t0
+            alpha = (t - t0) / dt if dt > 0 else 0.0
+            alpha = max(0.0, min(1.0, alpha))
+
+            x = waypoint_x[i] + alpha * (waypoint_x[i + 1] - waypoint_x[i])
+            y = waypoint_y[i] + alpha * (waypoint_y[i + 1] - waypoint_y[i])
+            z = waypoint_z[i] + alpha * (waypoint_z[i + 1] - waypoint_z[i])
+
+            traj.append({
+                "timestamp_s": t,
+                "x": x,
+                "y": y,
+                "z": z,
+                "yaw": float(row["yaw_deg"]),
+                "pitch": float(row["pitch_deg"]),
+                "roll": float(row["roll_deg"]),
+            })
+
     return traj
 
 
@@ -311,13 +372,9 @@ class GetImage:
         Returns JSON with a base64-encoded PNG.
         """
         import base64
-        import tempfile
 
         import cv2
         import torch
-        from PIL import Image as PILImage
-
-        import depth_pro
 
         # 1. Pick the best source image
         idx = self._find_best(x, y, z, yaw)
@@ -326,34 +383,18 @@ class GetImage:
 
         # 2. Extract frame from video at the matching timestamp
         frame_bgr = _extract_frame(self.cap, src["timestamp_s"])
-        img_np = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        pil_img = PILImage.fromarray(img_np)
+        img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
-        # 3. Depth estimation
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            pil_img.save(tmp, format="PNG")
-            tmp_path = tmp.name
-
-        image_arr, _, f_px = depth_pro.load_rgb(tmp_path)
-        image_t = self.transform(image_arr).half().to(self.device)
+        # 3. Depth estimation — feed numpy RGB array directly to transform
+        image_t = self.transform(img_rgb).half().to(self.device)
 
         with torch.no_grad():
-            pred = self.model.infer(image_t, f_px=f_px)
+            pred = self.model.infer(image_t, f_px=None)
 
         depth_m = pred["depth"].detach().float().cpu().numpy()
         focal = float(pred["focallength_px"])
 
         # 4. Relative pose: source → target
-        #
-        #    Source camera frame: X_src = R_src @ (P_world - p_src)
-        #    Target camera frame: X_tgt = R_tgt @ (P_world - p_tgt)
-        #
-        #    The reproject function applies:
-        #        X_tgt = (X_src - t) @ R^T
-        #
-        #    Matching terms gives:
-        #        R = R_tgt @ R_src^T
-        #        t = (p_tgt - p_src) @ R_src^T
         R_src = (
             rot_y(src["yaw"]) @ rot_x(src["pitch"]) @ rot_z(src["roll"])
         )
@@ -366,10 +407,9 @@ class GetImage:
         t = dp @ R_src.T
 
         # 5. Reproject to novel view
-        I_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
         H, W = depth_m.shape
         K = build_K(W, H, focal)
-        out_bgr, _ = reproject_novel_view(I_bgr, depth_m, K, R, t)
+        out_bgr, _ = reproject_novel_view(frame_bgr, depth_m, K, R, t)
 
         # 6. Return base64-encoded PNG
         _, buf = cv2.imencode(".png", out_bgr)
@@ -384,31 +424,21 @@ class GetImage:
 
         Returns: {"image_png": bytes, "source_idx": int, "source_timestamp_s": float}
         """
-        import tempfile
-
         import cv2
         import torch
-        from PIL import Image as PILImage
-
-        import depth_pro
 
         idx = self._find_best(x, y, z, yaw)
         src = self.db[idx]
         print(f"Selected source frame at t={src['timestamp_s']:.3f}s")
 
         frame_bgr = _extract_frame(self.cap, src["timestamp_s"])
-        img_np = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        pil_img = PILImage.fromarray(img_np)
+        img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            pil_img.save(tmp, format="PNG")
-            tmp_path = tmp.name
-
-        image_arr, _, f_px = depth_pro.load_rgb(tmp_path)
-        image_t = self.transform(image_arr).half().to(self.device)
+        # Feed numpy RGB array directly to transform (skip temp PNG save + load_rgb)
+        image_t = self.transform(img_rgb).half().to(self.device)
 
         with torch.no_grad():
-            pred = self.model.infer(image_t, f_px=f_px)
+            pred = self.model.infer(image_t, f_px=None)
 
         depth_m = pred["depth"].detach().float().cpu().numpy()
         focal = float(pred["focallength_px"])
@@ -423,10 +453,9 @@ class GetImage:
         )
         t = dp @ R_src.T
 
-        I_bgr = frame_bgr
         H, W = depth_m.shape
         K = build_K(W, H, focal)
-        out_bgr, _ = reproject_novel_view(I_bgr, depth_m, K, R, t)
+        out_bgr, _ = reproject_novel_view(frame_bgr, depth_m, K, R, t)
 
         _, buf = cv2.imencode(".png", out_bgr)
         return {
