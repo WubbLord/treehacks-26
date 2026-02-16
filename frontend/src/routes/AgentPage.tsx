@@ -1,5 +1,5 @@
-import { useEffect, useMemo } from "react";
-import { useParams } from "react-router-dom";
+import { useEffect, useMemo, useRef } from "react";
+import { useParams, useSearchParams } from "react-router-dom";
 import { useAgentSession } from "../hooks/useAgentSession";
 import { QueryInput } from "../components/QueryInput";
 import { MAX_AGENT_STEPS } from "../config";
@@ -21,6 +21,8 @@ const AGENT_STATUS_LABELS: Record<string, string> = {
 
 export function AgentPage() {
   const { sessionId: urlSessionId } = useParams<{ sessionId?: string }>();
+  const [searchParams] = useSearchParams();
+  const autoStarted = useRef(false);
 
   const {
     sessionId,
@@ -40,6 +42,17 @@ export function AgentPage() {
     }
   }, [urlSessionId, sessionStatus, joinSession]);
 
+  // Auto-start from query params: /agent?q=find+bathroom&n=2
+  useEffect(() => {
+    if (autoStarted.current) return;
+    const q = searchParams.get("q");
+    if (q && sessionStatus === "idle") {
+      autoStarted.current = true;
+      const n = parseInt(searchParams.get("n") ?? "2", 10);
+      startSession(q, isNaN(n) ? 2 : Math.max(1, Math.min(8, n)));
+    }
+  }, [searchParams, sessionStatus, startSession]);
+
   // Update URL when a new session is created from the query form
   useEffect(() => {
     if (sessionId && !urlSessionId) {
@@ -53,9 +66,10 @@ export function AgentPage() {
     startSession(query, numAgents);
   };
 
-  // Hide query form when viewing a shared session link
+  // Hide query form when viewing a shared session link or auto-started from params
+  const fromLink = !!urlSessionId || !!searchParams.get("q");
   const showQueryForm =
-    !urlSessionId &&
+    !fromLink &&
     (sessionStatus === "idle" ||
       sessionStatus === "complete" ||
       sessionStatus === "error");
@@ -72,7 +86,7 @@ export function AgentPage() {
         <span className={`status ${sessionStatus === "error" ? "error" : ""}`}>
           {error || STATUS_LABELS[sessionStatus] || sessionStatus.toUpperCase()}
         </span>
-        {sessionStatus === "running" && !urlSessionId && (
+        {sessionStatus === "running" && !fromLink && (
           <button className="replay-btn" onClick={cancelSession}>
             CANCEL
           </button>
@@ -120,6 +134,11 @@ export function AgentPage() {
                 {/* Header */}
                 <div className="agent-feed-header">
                   <span className="agent-feed-id">AGENT {agent.agentId}</span>
+                  {latestStep && (
+                    <span className="agent-feed-pose">
+                      ({latestStep.pose.x.toFixed(1)}, {latestStep.pose.y.toFixed(1)}, {latestStep.pose.z.toFixed(1)}, {latestStep.pose.yaw.toFixed(0)}&deg;)
+                    </span>
+                  )}
                   <span className={`agent-feed-status ${agent.status}`}>
                     {AGENT_STATUS_LABELS[agent.status] ?? agent.status.toUpperCase()}
                   </span>

@@ -3,13 +3,14 @@
 
 import json
 import os
+from urllib.parse import urlencode
 
 import httpx
 from fastmcp import FastMCP, Context
 
-AGENT_API_URL = os.environ.get(
-    "AGENT_API_URL",
-    "https://zhangbrwubb--keryx-agents-api.modal.run",
+AGENT_STREAM_URL = os.environ.get(
+    "AGENT_STREAM_URL",
+    "https://zhangbrwubb--keryx-agents-stream-agents.modal.run",
 )
 FRONTEND_URL = os.environ.get(
     "FRONTEND_URL", "https://1996-68-65-169-134.ngrok-free.app"
@@ -32,10 +33,23 @@ async def explore_building(
     await ctx.info(f"Launching {num_agents} agent(s) to search for: {query}")
     await ctx.report_progress(0, 1)
 
-    # Step 1: Create session via POST
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{AGENT_API_URL}/sessions",
+    # Send viewer link so the user can watch live
+    viewer_params = urlencode({"q": query, "n": num_agents})
+    viewer_url = f"{FRONTEND_URL}/agent?{viewer_params}"
+    await ctx.info(f"Watch the exploration live: {viewer_url}")
+
+    # Consume the single-POST SSE stream (same endpoint the frontend uses)
+    result_description = None
+    result_found = False
+    max_step_seen = 0
+    total_steps = 15
+    agents_active = set()
+    agents_finished = set()
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(600.0)) as client:
+        async with client.stream(
+            "POST",
+            AGENT_STREAM_URL,
             json={
                 "query": query,
                 "num_agents": num_agents,
@@ -44,24 +58,7 @@ async def explore_building(
                 "start_z": 0.0,
                 "start_yaw": 0.0,
             },
-        )
-        resp.raise_for_status()
-        session_id = resp.json()["session_id"]
-
-    viewer_url = f"{FRONTEND_URL}/agent/{session_id}"
-    await ctx.info(f"Watch the exploration live: {viewer_url}")
-
-    # Step 2: Consume SSE stream via GET
-    result_description = None
-    result_found = False
-    max_step_seen = 0
-    total_steps = 15
-
-    async with httpx.AsyncClient(timeout=httpx.Timeout(600.0)) as client:
-        async with client.stream(
-            "GET",
-            f"{AGENT_API_URL}/sessions/{session_id}/stream",
-            headers={"Accept": "text/event-stream"},
+            headers={"Content-Type": "application/json"},
         ) as stream:
             buffer = ""
             async for chunk in stream.aiter_text():
@@ -84,35 +81,58 @@ async def explore_building(
                     event_type = event.get("type")
 
                     if event_type == "agent_started":
+                        agent_id = event.get("agent_id")
+                        agents_active.add(agent_id)
                         pose = event.get("start_pose", {})
                         await ctx.info(
-                            f"Agent {event['agent_id']} started at "
-                            f"({pose.get('x', 0):.1f}, {pose.get('y', 0):.1f})"
+                            f"Agent {agent_id} started at "
+                            f"({pose.get('x', 0):.1f}, {pose.get('y', 0):.1f}, "
+                            f"{pose.get('z', 0):.1f}, yaw={pose.get('yaw', 0):.0f}°) "
+                            f"[{len(agents_active)} agent(s) active]"
                         )
 
                     elif event_type == "agent_step":
                         step = event.get("step", 0)
                         agent_id = event.get("agent_id", "?")
                         reasoning = event.get("reasoning", "")
+                        action = event.get("action", "move")
+                        pose = event.get("pose", {})
+                        t = event.get("total_steps", total_steps)
+                        if t:
+                            total_steps = t
+
                         if step > max_step_seen:
                             max_step_seen = step
                             await ctx.report_progress(step, total_steps)
+
+                        pos_str = (
+                            f"({pose.get('x', 0):.1f}, {pose.get('y', 0):.1f}, "
+                            f"yaw={pose.get('yaw', 0):.0f}°)"
+                        )
                         await ctx.info(
-                            f"Agent {agent_id} step {step}/{total_steps}: {reasoning}"
+                            f"Agent {agent_id} step {step}/{total_steps} "
+                            f"@ {pos_str} [{action}]: {reasoning}"
                         )
 
                     elif event_type == "agent_found":
+                        agent_id = event.get("agent_id")
                         result_found = True
                         result_description = event.get("description", "")
+                        steps_taken = event.get("steps", "?")
+                        agents_finished.add(agent_id)
                         await ctx.info(
-                            f"Agent {event.get('agent_id')} FOUND IT: "
+                            f"Agent {agent_id} FOUND TARGET after {steps_taken} steps: "
                             f"{result_description}"
                         )
 
                     elif event_type == "agent_done":
+                        agent_id = event.get("agent_id")
+                        steps_taken = event.get("steps", "?")
+                        agents_finished.add(agent_id)
+                        remaining = len(agents_active) - len(agents_finished)
                         await ctx.info(
-                            f"Agent {event.get('agent_id')} finished "
-                            f"without finding target"
+                            f"Agent {agent_id} finished after {steps_taken} steps "
+                            f"(no target) — {remaining} agent(s) still searching"
                         )
 
                     elif event_type == "session_complete":
@@ -122,7 +142,9 @@ async def explore_building(
 
                     elif event_type == "error":
                         msg = event.get("message", "Unknown error")
-                        await ctx.error(f"Error: {msg}")
+                        agent_id = event.get("agent_id")
+                        prefix = f"Agent {agent_id}" if agent_id is not None else "Session"
+                        await ctx.error(f"{prefix} error: {msg}")
 
     await ctx.report_progress(1, 1)
 
@@ -131,7 +153,7 @@ async def explore_building(
         return (
             f"Found it!\n\n"
             f"{result_description}\n\n"
-            f"Watch the full exploration: {viewer_url}"
+            f"Watch the exploration: {viewer_url}"
         )
     elif result_description:
         return (

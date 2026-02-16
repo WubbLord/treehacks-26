@@ -18,7 +18,8 @@ export type AgentStepEvent = {
   step: number;
   total_steps: number;
   pose: Pose;
-  image_b64: string;
+  image_b64?: string;
+  image?: string;
   reasoning: string;
   action: "move" | "found";
 };

@@ -5,6 +5,7 @@ import {
   startAgentStream,
 } from "../api/agentStream";
 import { fetchImageForPose } from "../api/images";
+import type { Pose } from "../types/pose";
 import { DEFAULT_AGENT_COUNT, MAX_AGENT_STEPS } from "../config";
 import type { AgentState, AgentStep, SessionStatus } from "../types/agent";
 import type { AgentEvent } from "../api/agentStream";
@@ -33,21 +34,49 @@ export function useAgentSession() {
   const processEvent = useCallback((event: AgentEvent) => {
     console.log("[SSE event]", event);
     switch (event.type) {
-      case "agent_started":
+      case "agent_started": {
+        const agentId = event.agent_id;
+        const startPose: Pose = event.start_pose;
         setAgents((prev) => {
           const next = new Map(prev);
-          next.set(event.agent_id, {
-            agentId: event.agent_id,
+          next.set(agentId, {
+            agentId,
             status: "exploring",
-            startPose: event.start_pose,
+            startPose,
             steps: [],
             trajectory: [],
           });
           return next;
         });
         // Auto-select first agent
-        setSelectedAgentId((cur) => cur ?? event.agent_id);
+        setSelectedAgentId((cur) => cur ?? agentId);
+        // Fetch initial image so the feed isn't blank
+        fetchImageForPose(startPose)
+          .then((imageSrc) => {
+            setAgents((prev) => {
+              const next = new Map(prev);
+              const agent = next.get(agentId);
+              if (!agent || agent.steps.length > 0) return prev;
+              next.set(agentId, {
+                ...agent,
+                steps: [
+                  {
+                    step: 0,
+                    pose: startPose,
+                    imageSrc,
+                    reasoning: "Initializing — scanning surroundings...",
+                    action: "move",
+                  },
+                ],
+              });
+              return next;
+            });
+          })
+          .catch(() => {
+            // ignore — real steps will arrive soon
+          });
         break;
+      }
 
       case "agent_step":
         setAgents((prev) => {
@@ -55,10 +84,17 @@ export function useAgentSession() {
           const agent = next.get(event.agent_id);
           if (!agent) return prev;
 
+          const raw = event.image ?? event.image_b64 ?? "";
+          const imageSrc = raw
+            ? raw.startsWith("data:")
+              ? raw
+              : `data:image/png;base64,${raw}`
+            : "";
+
           const step: AgentStep = {
             step: event.step,
             pose: event.pose,
-            imageSrc: `data:image/png;base64,${event.image_b64}`,
+            imageSrc,
             reasoning: event.reasoning,
             action: event.action,
           };

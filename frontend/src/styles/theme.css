@@ -1034,6 +1034,11 @@ body {
   color: var(--swiss-white);
 }
 
+.agent-feed-pose {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.625rem;
+}
+
 .agent-feed-status {
   font-size: 0.625rem;
   padding: var(--space-1) var(--space-2);
